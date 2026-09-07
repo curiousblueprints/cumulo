@@ -1,0 +1,659 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { Application } from '../src/app/Application.js';
+import {
+  AccessType,
+  ClauseMatch,
+  ClauseOperator,
+  FieldType,
+  STD_NAMESPACE,
+  type Id,
+} from '../src/domain/types.js';
+import type { SecurityContext } from '../src/security/context.js';
+import { AccessDeniedError, NotFoundError, ValidationError } from '../src/security/errors.js';
+
+async function freshApp(): Promise<Application> {
+  return Application.start({ database: { driver: 'sqlite', file: ':memory:' } });
+}
+
+/** A fresh install with the first (Administrator) user created. */
+async function installed(): Promise<{ app: Application; admin: SecurityContext }> {
+  const app = await freshApp();
+  const admin = await app.install.completeSetup({
+    username: 'root',
+    email: 'root@example.com',
+    password: 'correct horse',
+  });
+  return { app, admin };
+}
+
+test('a fresh install has exactly the std namespace and the Administrator role', async () => {
+  const app = await freshApp();
+  assert.equal(await app.install.isSetupComplete(), false);
+
+  const admin = await app.install.completeSetup({
+    username: 'root',
+    email: 'root@example.com',
+    password: 'correct horse',
+  });
+  assert.equal(admin.role.name, 'Administrator');
+  assert.equal(admin.role.parentId, null);
+  assert.equal(admin.role.isSystem, true);
+
+  const spaces = await app.metadata.listNamespaces(admin);
+  assert.deepEqual(
+    spaces.map((n) => n.name),
+    [STD_NAMESPACE],
+  );
+  assert.deepEqual(
+    (await app.metadata.listSecurityRoles(admin)).map((r) => r.name),
+    ['Administrator'],
+  );
+  assert.equal((await app.metadata.listTables(admin)).length, 0);
+  await app.stop();
+});
+
+test('setup can only be completed once', async () => {
+  const { app } = await installed();
+  await assert.rejects(
+    () =>
+      app.install.completeSetup({
+        username: 'second',
+        email: 's@example.com',
+        password: 'another one',
+      }),
+    ValidationError,
+  );
+  await app.stop();
+});
+
+test('authentication produces a usable context and rejects bad credentials', async () => {
+  const { app } = await installed();
+  const context = await app.auth.authenticate('root', 'correct horse');
+  assert.equal(context.user.username, 'root');
+  await assert.rejects(() => app.auth.authenticate('root', 'wrong'), AccessDeniedError);
+  await assert.rejects(() => app.auth.authenticate('nobody', 'correct horse'), AccessDeniedError);
+  await app.stop();
+});
+
+/** Builds an Invoice table with a few fields, as the administrator. */
+async function invoiceTable(app: Application, admin: SecurityContext) {
+  const std = (await app.metadata.listNamespaces(admin)).find((n) => n.name === STD_NAMESPACE);
+  assert.ok(std);
+  const table = await app.metadata.createTable(admin, {
+    namespaceId: std.id,
+    name: 'Invoice',
+    label: 'Invoice',
+  });
+  const amount = await app.metadata.createField(admin, {
+    tableId: table.id,
+    name: 'amount',
+    type: FieldType.Number,
+  });
+  const owner = await app.metadata.createField(admin, {
+    tableId: table.id,
+    name: 'owner',
+    type: FieldType.Text,
+  });
+  const secret = await app.metadata.createField(admin, {
+    tableId: table.id,
+    name: 'secret',
+    type: FieldType.Text,
+  });
+  return { std, table, amount, owner, secret };
+}
+
+test('the Administrator role reads and writes without any rules', async () => {
+  const { app, admin } = await installed();
+  const { table } = await invoiceTable(app, admin);
+
+  const created = await app.records.create(admin, table.id, {
+    amount: 100,
+    owner: 'root',
+    secret: 'hidden',
+  });
+  assert.equal(created.values['amount'], 100);
+
+  const all = await app.records.list(admin, table.id);
+  assert.equal(all.length, 1);
+  assert.equal(all[0]?.values['secret'], 'hidden');
+
+  const updated = await app.records.update(admin, created.id, { amount: 250 });
+  assert.equal(updated.values['amount'], 250);
+
+  await app.records.delete(admin, created.id);
+  assert.equal((await app.records.list(admin, table.id)).length, 0);
+  await app.stop();
+});
+
+test('a role with no rules sees nothing', async () => {
+  const { app, admin } = await installed();
+  const { table } = await invoiceTable(app, admin);
+  await app.records.create(admin, table.id, { amount: 10, owner: 'root', secret: 's' });
+
+  const role = await app.metadata.createSecurityRole(admin, {
+    name: 'Empty',
+    parentId: admin.role.id,
+  });
+  await app.metadata.createUser(admin, {
+    username: 'nobody',
+    email: 'n@example.com',
+    password: 'password123',
+    securityRoleId: role.id,
+  });
+  const user = await app.auth.authenticate('nobody', 'password123');
+
+  assert.equal((await app.metadata.listTables(user)).length, 0);
+  await assert.rejects(() => app.records.list(user, table.id), AccessDeniedError);
+  await app.stop();
+});
+
+test('rules gate records by clause and fields by grant', async () => {
+  const { app, admin } = await installed();
+  const { table, amount, owner } = await invoiceTable(app, admin);
+
+  const role = await app.metadata.createSecurityRole(admin, {
+    name: 'Sales',
+    parentId: admin.role.id,
+  });
+  const rule = await app.metadata.createSecurityRule(admin, {
+    name: 'Own large invoices',
+    tableId: table.id,
+    accessTypes: [AccessType.Read],
+    clauseMatch: ClauseMatch.All,
+    clauses: [
+      { fieldId: owner.id, operator: ClauseOperator.Equals, targetValue: '$user.username' },
+      { fieldId: amount.id, operator: ClauseOperator.GreaterThan, targetValue: '50' },
+    ],
+    // `secret` is deliberately left out of the grant.
+    fieldIds: [amount.id, owner.id],
+  });
+  await app.metadata.assignRuleToRole(admin, role.id, rule.id);
+  await app.metadata.createUser(admin, {
+    username: 'sally',
+    email: 's@example.com',
+    password: 'password123',
+    securityRoleId: role.id,
+  });
+
+  const mine = await app.records.create(admin, table.id, {
+    amount: 100,
+    owner: 'sally',
+    secret: 'hidden',
+  });
+  const tooSmall = await app.records.create(admin, table.id, {
+    amount: 10,
+    owner: 'sally',
+    secret: 'hidden',
+  });
+  const someoneElse = await app.records.create(admin, table.id, {
+    amount: 900,
+    owner: 'root',
+    secret: 'hidden',
+  });
+
+  const sally = await app.auth.authenticate('sally', 'password123');
+  const visible = await app.records.list(sally, table.id);
+  assert.deepEqual(
+    visible.map((record) => record.id),
+    [mine.id],
+  );
+  // Field-level security: `secret` is not in the projection at all.
+  assert.deepEqual(Object.keys(visible[0]?.values ?? {}).sort(), ['amount', 'owner']);
+  assert.deepEqual(
+    (await app.metadata.listReadableFields(sally, table.id)).map((f) => f.name).sort(),
+    ['amount', 'owner'],
+  );
+
+  // Records outside the rule are indistinguishable from records that do not exist.
+  await assert.rejects(() => app.records.get(sally, tooSmall.id), NotFoundError);
+  await assert.rejects(() => app.records.get(sally, someoneElse.id), NotFoundError);
+
+  // Read access is not edit or delete access.
+  await assert.rejects(() => app.records.update(sally, mine.id, { amount: 1 }), NotFoundError);
+  await assert.rejects(() => app.records.delete(sally, mine.id), NotFoundError);
+  await app.stop();
+});
+
+test('edit access governs both updating and creating', async () => {
+  const { app, admin } = await installed();
+  const { table, amount, owner, secret } = await invoiceTable(app, admin);
+
+  const role = await app.metadata.createSecurityRole(admin, {
+    name: 'Editors',
+    parentId: admin.role.id,
+  });
+  const rule = await app.metadata.createSecurityRule(admin, {
+    name: 'Edit own invoices',
+    tableId: table.id,
+    accessTypes: [AccessType.Read, AccessType.Edit],
+    clauses: [{ fieldId: owner.id, operator: ClauseOperator.Equals, targetValue: '$user.username' }],
+    fieldIds: [amount.id, owner.id],
+  });
+  await app.metadata.assignRuleToRole(admin, role.id, rule.id);
+  await app.metadata.createUser(admin, {
+    username: 'eddie',
+    email: 'e@example.com',
+    password: 'password123',
+    securityRoleId: role.id,
+  });
+  const eddie = await app.auth.authenticate('eddie', 'password123');
+
+  // Creating a record the rule would not cover is refused...
+  await assert.rejects(
+    () => app.records.create(eddie, table.id, { amount: 5, owner: 'someone-else' }),
+    AccessDeniedError,
+  );
+  // ...as is writing a field the rule does not grant.
+  await assert.rejects(
+    () => app.records.create(eddie, table.id, { amount: 5, owner: 'eddie', secret: 'x' }),
+    AccessDeniedError,
+  );
+
+  const created = await app.records.create(eddie, table.id, { amount: 5, owner: 'eddie' });
+  const updated = await app.records.update(eddie, created.id, { amount: 42 });
+  assert.equal(updated.values['amount'], 42);
+  await assert.rejects(
+    () => app.records.update(eddie, created.id, { secret: 'x' }),
+    AccessDeniedError,
+  );
+  await assert.rejects(() => app.records.delete(eddie, created.id), NotFoundError);
+  void secret;
+  await app.stop();
+});
+
+test('a role encompasses the access of the roles beneath it', async () => {
+  const { app, admin } = await installed();
+  const { table, amount, owner } = await invoiceTable(app, admin);
+
+  const manager = await app.metadata.createSecurityRole(admin, {
+    name: 'Manager',
+    parentId: admin.role.id,
+  });
+  const rep = await app.metadata.createSecurityRole(admin, {
+    name: 'Rep',
+    parentId: manager.id,
+  });
+
+  // The rule belongs to the child role only.
+  const rule = await app.metadata.createSecurityRule(admin, {
+    name: 'All invoices',
+    tableId: table.id,
+    accessTypes: [AccessType.Read],
+    fieldIds: [amount.id, owner.id],
+  });
+  await app.metadata.assignRuleToRole(admin, rep.id, rule.id);
+
+  for (const [username, roleId] of [
+    ['mandy', manager.id],
+    ['ricky', rep.id],
+  ] as const) {
+    await app.metadata.createUser(admin, {
+      username,
+      email: `${username}@example.com`,
+      password: 'password123',
+      securityRoleId: roleId,
+    });
+  }
+  await app.records.create(admin, table.id, { amount: 7, owner: 'root', secret: 's' });
+
+  const ricky = await app.auth.authenticate('ricky', 'password123');
+  const mandy = await app.auth.authenticate('mandy', 'password123');
+
+  // The child holds the rule; the parent inherits it upward.
+  assert.equal((await app.records.list(ricky, table.id)).length, 1);
+  assert.equal((await app.records.list(mandy, table.id)).length, 1);
+
+  // ...but not downward: a sibling under Manager sees nothing.
+  const sibling = await app.metadata.createSecurityRole(admin, {
+    name: 'Intern',
+    parentId: manager.id,
+  });
+  await app.metadata.createUser(admin, {
+    username: 'iris',
+    email: 'i@example.com',
+    password: 'password123',
+    securityRoleId: sibling.id,
+  });
+  const iris = await app.auth.authenticate('iris', 'password123');
+  await assert.rejects(() => app.records.list(iris, table.id), AccessDeniedError);
+  await app.stop();
+});
+
+test('namespace access gates tables outside std', async () => {
+  const { app, admin } = await installed();
+  const acme = await app.metadata.createNamespace(admin, { name: 'acme', label: 'Acme' });
+  const table = await app.metadata.createTable(admin, {
+    namespaceId: acme.id,
+    name: 'Gadget',
+  });
+  const name = await app.metadata.createField(admin, {
+    tableId: table.id,
+    name: 'title',
+    type: FieldType.Text,
+  });
+  await app.records.create(admin, table.id, { title: 'thing' });
+
+  const role = await app.metadata.createSecurityRole(admin, {
+    name: 'Outsiders',
+    parentId: admin.role.id,
+  });
+  const rule = await app.metadata.createSecurityRule(admin, {
+    name: 'All gadgets',
+    tableId: table.id,
+    accessTypes: [AccessType.Read],
+    fieldIds: [name.id],
+  });
+  await app.metadata.assignRuleToRole(admin, role.id, rule.id);
+  await app.metadata.createUser(admin, {
+    username: 'olive',
+    email: 'o@example.com',
+    password: 'password123',
+    securityRoleId: role.id,
+  });
+
+  // The rule alone is not enough without access to the namespace.
+  let olive = await app.auth.authenticate('olive', 'password123');
+  await assert.rejects(() => app.records.list(olive, table.id), AccessDeniedError);
+  assert.equal((await app.metadata.listTables(olive)).length, 0);
+
+  await app.metadata.grantNamespaceAccess(admin, role.id, acme.id);
+  olive = await app.auth.authenticate('olive', 'password123');
+  assert.equal((await app.records.list(olive, table.id)).length, 1);
+  assert.equal((await app.metadata.listTables(olive)).length, 1);
+  await app.stop();
+});
+
+test('custom clause logic decides which records a rule covers', async () => {
+  const { app, admin } = await installed();
+  const { table, amount, owner } = await invoiceTable(app, admin);
+
+  const role = await app.metadata.createSecurityRole(admin, {
+    name: 'Analysts',
+    parentId: admin.role.id,
+  });
+  const rule = await app.metadata.createSecurityRule(admin, {
+    name: 'Mine or big',
+    tableId: table.id,
+    accessTypes: [AccessType.Read],
+    clauseMatch: ClauseMatch.Custom,
+    clauseLogic: '1 OR (2 AND NOT 3)',
+    clauses: [
+      { fieldId: owner.id, operator: ClauseOperator.Equals, targetValue: '$user.username' },
+      { fieldId: amount.id, operator: ClauseOperator.GreaterThan, targetValue: '500' },
+      { fieldId: amount.id, operator: ClauseOperator.GreaterThan, targetValue: '5000' },
+    ],
+    fieldIds: [amount.id, owner.id],
+  });
+  await app.metadata.assignRuleToRole(admin, role.id, rule.id);
+  await app.metadata.createUser(admin, {
+    username: 'annie',
+    email: 'a@example.com',
+    password: 'password123',
+    securityRoleId: role.id,
+  });
+
+  const own = await app.records.create(admin, table.id, { amount: 1, owner: 'annie' });
+  const big = await app.records.create(admin, table.id, { amount: 900, owner: 'root' });
+  await app.records.create(admin, table.id, { amount: 9000, owner: 'root' });
+  await app.records.create(admin, table.id, { amount: 3, owner: 'root' });
+
+  const annie = await app.auth.authenticate('annie', 'password123');
+  const visible = (await app.records.list(annie, table.id)).map((record) => record.id).sort();
+  assert.deepEqual(visible, [own.id, big.id].sort());
+
+  await assert.rejects(
+    () =>
+      app.metadata.createSecurityRule(admin, {
+        name: 'Bad logic',
+        tableId: table.id,
+        accessTypes: [AccessType.Read],
+        clauseMatch: ClauseMatch.Custom,
+        clauseLogic: '1 AND 7',
+        clauses: [{ fieldId: owner.id, operator: ClauseOperator.IsNotNull }],
+      }),
+    ValidationError,
+  );
+  await app.stop();
+});
+
+test('clauses can compare two fields of the same record', async () => {
+  const { app, admin } = await installed();
+  const { table, amount } = await invoiceTable(app, admin);
+  const limit = await app.metadata.createField(admin, {
+    tableId: table.id,
+    name: 'limitAmount',
+    type: FieldType.Number,
+  });
+
+  const role = await app.metadata.createSecurityRole(admin, {
+    name: 'Auditors',
+    parentId: admin.role.id,
+  });
+  const rule = await app.metadata.createSecurityRule(admin, {
+    name: 'Over limit',
+    tableId: table.id,
+    accessTypes: [AccessType.Read],
+    clauses: [
+      { fieldId: amount.id, operator: ClauseOperator.GreaterThan, compareFieldId: limit.id },
+    ],
+    fieldIds: [amount.id, limit.id],
+  });
+  await app.metadata.assignRuleToRole(admin, role.id, rule.id);
+  await app.metadata.createUser(admin, {
+    username: 'aud',
+    email: 'aud@example.com',
+    password: 'password123',
+    securityRoleId: role.id,
+  });
+
+  const over = await app.records.create(admin, table.id, { amount: 100, limitAmount: 50 });
+  await app.records.create(admin, table.id, { amount: 10, limitAmount: 50 });
+  // A null on either side is not "greater than"; the clause fails closed.
+  await app.records.create(admin, table.id, { amount: 999 });
+
+  const auditor = await app.auth.authenticate('aud', 'password123');
+  assert.deepEqual(
+    (await app.records.list(auditor, table.id)).map((record) => record.id),
+    [over.id],
+  );
+  await app.stop();
+});
+
+test('only the Administrator role may change metadata', async () => {
+  const { app, admin } = await installed();
+  const { std } = await invoiceTable(app, admin);
+  const role = await app.metadata.createSecurityRole(admin, {
+    name: 'Plain',
+    parentId: admin.role.id,
+  });
+  await app.metadata.createUser(admin, {
+    username: 'plain',
+    email: 'p@example.com',
+    password: 'password123',
+    securityRoleId: role.id,
+  });
+  const plain = await app.auth.authenticate('plain', 'password123');
+
+  await assert.rejects(
+    () => app.metadata.createTable(plain, { namespaceId: std.id, name: 'Sneaky' }),
+    AccessDeniedError,
+  );
+  await assert.rejects(
+    () => app.metadata.createSecurityRole(plain, { name: 'Sneakier', parentId: role.id }),
+    AccessDeniedError,
+  );
+  await assert.rejects(
+    () =>
+      app.metadata.createUser(plain, {
+        username: 'mallory',
+        email: 'm@example.com',
+        password: 'password123',
+        securityRoleId: role.id,
+      }),
+    AccessDeniedError,
+  );
+  await assert.rejects(() => app.metadata.listUsers(plain), AccessDeniedError);
+  await app.stop();
+});
+
+test('the Administrator role is protected from modification', async () => {
+  const { app, admin } = await installed();
+  await assert.rejects(
+    () => app.metadata.createSecurityRole(admin, { name: 'Administrator', parentId: admin.role.id }),
+    ValidationError,
+  );
+  await assert.rejects(() => app.metadata.deleteSecurityRole(admin, admin.role.id), ValidationError);
+  await assert.rejects(
+    () => app.metadata.grantNamespaceAccess(admin, admin.role.id, 'anything'),
+    ValidationError,
+  );
+  await app.stop();
+});
+
+test('custom roles must name a parent', async () => {
+  const { app, admin } = await installed();
+  await assert.rejects(
+    () => app.metadata.createSecurityRole(admin, { name: 'Orphan', parentId: '' as Id }),
+    ValidationError,
+  );
+  await assert.rejects(
+    () => app.metadata.createSecurityRole(admin, { name: 'Orphan', parentId: 'nope' }),
+    ValidationError,
+  );
+  await app.stop();
+});
+
+test('field values are validated and coerced by type', async () => {
+  const { app, admin } = await installed();
+  const { table } = await invoiceTable(app, admin);
+  await app.metadata.createField(admin, {
+    tableId: table.id,
+    name: 'paid',
+    type: FieldType.Boolean,
+  });
+  await app.metadata.createField(admin, {
+    tableId: table.id,
+    name: 'dueOn',
+    type: FieldType.Date,
+  });
+
+  const record = await app.records.create(admin, table.id, {
+    amount: '42.5',
+    paid: 'yes',
+    dueOn: '2026-01-31',
+  });
+  assert.equal(record.values['amount'], 42.5);
+  assert.equal(record.values['paid'], true);
+  assert.equal(record.values['dueOn'], '2026-01-31');
+
+  await assert.rejects(
+    () => app.records.create(admin, table.id, { amount: 'not a number' }),
+    ValidationError,
+  );
+  await assert.rejects(
+    () => app.records.create(admin, table.id, { dueOn: '31/01/2026' }),
+    ValidationError,
+  );
+  await assert.rejects(
+    () => app.records.create(admin, table.id, { nosuchfield: 1 }),
+    ValidationError,
+  );
+  await app.stop();
+});
+
+test('reference fields must point at a record of the referenced table', async () => {
+  const { app, admin } = await installed();
+  const { std, table } = await invoiceTable(app, admin);
+  const lines = await app.metadata.createTable(admin, { namespaceId: std.id, name: 'InvoiceLine' });
+  await app.metadata.createField(admin, {
+    tableId: lines.id,
+    name: 'invoice',
+    type: FieldType.Reference,
+    referenceTableId: table.id,
+  });
+
+  const invoice = await app.records.create(admin, table.id, { amount: 1 });
+  const line = await app.records.create(admin, lines.id, { invoice: invoice.id });
+  assert.equal(line.values['invoice'], invoice.id);
+
+  await assert.rejects(
+    () => app.records.create(admin, lines.id, { invoice: 'not-a-record' }),
+    ValidationError,
+  );
+  // Pointing at a record in the wrong table is rejected too.
+  await assert.rejects(
+    () => app.records.create(admin, lines.id, { invoice: line.id }),
+    ValidationError,
+  );
+  await assert.rejects(
+    () =>
+      app.metadata.createField(admin, {
+        tableId: lines.id,
+        name: 'dangling',
+        type: FieldType.Reference,
+      }),
+    ValidationError,
+  );
+  await app.stop();
+});
+
+test('required fields are enforced on create and on clearing', async () => {
+  const { app, admin } = await installed();
+  const { std } = await invoiceTable(app, admin);
+  const table = await app.metadata.createTable(admin, { namespaceId: std.id, name: 'Contact' });
+  await app.metadata.createField(admin, {
+    tableId: table.id,
+    name: 'lastName',
+    type: FieldType.Text,
+    isRequired: true,
+  });
+
+  await assert.rejects(() => app.records.create(admin, table.id, {}), ValidationError);
+  const record = await app.records.create(admin, table.id, { lastName: 'Ada' });
+  await assert.rejects(
+    () => app.records.update(admin, record.id, { lastName: '' }),
+    ValidationError,
+  );
+  await app.stop();
+});
+
+test('deleting a record removes its values', async () => {
+  const { app, admin } = await installed();
+  const { table } = await invoiceTable(app, admin);
+  const record = await app.records.create(admin, table.id, { amount: 1, owner: 'root' });
+  await app.records.delete(admin, record.id);
+  assert.equal(await app.database.count('value', { where: [{ column: 'recordId', operator: 'eq', value: record.id }] }), 0);
+  await app.stop();
+});
+
+test('metadata changes take effect for already-authenticated users', async () => {
+  const { app, admin } = await installed();
+  const { table, amount } = await invoiceTable(app, admin);
+  const role = await app.metadata.createSecurityRole(admin, {
+    name: 'Late',
+    parentId: admin.role.id,
+  });
+  await app.metadata.createUser(admin, {
+    username: 'lena',
+    email: 'l@example.com',
+    password: 'password123',
+    securityRoleId: role.id,
+  });
+  await app.records.create(admin, table.id, { amount: 5 });
+
+  const lena = await app.auth.authenticate('lena', 'password123');
+  await assert.rejects(() => app.records.list(lena, table.id), AccessDeniedError);
+
+  const rule = await app.metadata.createSecurityRule(admin, {
+    name: 'Everything',
+    tableId: table.id,
+    accessTypes: [AccessType.Read],
+    fieldIds: [amount.id],
+  });
+  await app.metadata.assignRuleToRole(admin, role.id, rule.id);
+
+  // The same context now sees the record: the permission cache was invalidated.
+  assert.equal((await app.records.list(lena, table.id)).length, 1);
+  await app.stop();
+});

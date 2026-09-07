@@ -1,0 +1,21 @@
+{
+  "name": "cumulo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A minimal re-implementation of the force.com platform core: metadata-driven tables, records and a role/rule security layer.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node --disable-warning=ExperimentalWarning dist/src/main.js",
+    "dev": "tsc -p tsconfig.json && npm start",
+    "test": "tsc -p tsconfig.json && node --disable-warning=ExperimentalWarning --test dist/test/*.test.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}

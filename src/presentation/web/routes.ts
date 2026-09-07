@@ -1,0 +1,836 @@
+import type { Application } from '../../app/Application.js';
+import {
+  AccessType,
+  ClauseMatch,
+  ClauseOperator,
+  FieldType,
+  type FieldDef,
+  type TableDef,
+} from '../../domain/types.js';
+import type { SecurityContext } from '../../security/context.js';
+import { AccessDeniedError } from '../../security/errors.js';
+import type { Router } from '../http/router.js';
+import { clearedCookie, sessionCookie, type SessionStore } from '../http/sessions.js';
+import { RedirectSignal } from '../http/signals.js';
+import { html, redirect, type HttpRequest, type HttpResponse } from '../http/types.js';
+import { csrfInput, escapeHtml, optionList, page } from './layout.js';
+
+/**
+ * The HTML face of the platform.
+ *
+ * Handlers only ever call application services, never the store or the
+ * database. Every mutation is a form POST guarded by the session's CSRF token.
+ */
+export function registerWebRoutes(router: Router, app: Application, sessions: SessionStore): void {
+  const requireUser = (request: HttpRequest): SecurityContext => {
+    if (!request.context) throw new RedirectSignal('/login');
+    return request.context;
+  };
+
+  const checkCsrf = (request: HttpRequest): void => {
+    const expected = request.session?.csrfToken;
+    if (!expected || request.body['_csrf'] !== expected) {
+      throw new AccessDeniedError('Invalid or expired form token; please try again');
+    }
+  };
+
+  /** POST helper: run the action, then land somewhere with a message. */
+  const action = (
+    run: (request: HttpRequest) => Promise<string>,
+    fallback: (request: HttpRequest) => string,
+  ) =>
+    async (request: HttpRequest): Promise<HttpResponse> => {
+      const target = fallback(request);
+      try {
+        checkCsrf(request);
+        const notice = await run(request);
+        return redirect(withMessage(target, 'notice', notice));
+      } catch (error) {
+        if (error instanceof RedirectSignal) return redirect(error.location);
+        return redirect(withMessage(target, 'error', messageOf(error)));
+      }
+    };
+
+  router.get('/', async (request) => {
+    if (!(await app.install.isSetupComplete())) return redirect('/setup');
+    return redirect(request.context ? '/tables' : '/login');
+  });
+
+  // --- initial setup -----------------------------------------------------
+
+  router.get('/setup', async (request) => {
+    if (await app.install.isSetupComplete()) return redirect('/login');
+    return html(
+      page(
+        { title: 'Set up Cumulo', ...messages(request) },
+        `<h1>Welcome to Cumulo</h1>
+         <p class="lede">This installation has no users yet. The first user is created with the
+           <strong>Administrator</strong> role, which sits at the top of the role hierarchy and
+           therefore holds every permission on the installation.</p>
+         <section class="card"><form method="post" action="/setup">
+           <div class="row">
+             <div><label for="username">Username</label>
+               <input id="username" name="username" required minlength="3" autocomplete="username"></div>
+             <div><label for="email">Email</label>
+               <input id="email" name="email" type="email" required></div>
+           </div>
+           <label for="password">Password</label>
+           <input id="password" name="password" type="password" required minlength="8"
+             autocomplete="new-password">
+           <button>Create administrator</button>
+         </form></section>`,
+      ),
+    );
+  });
+
+  // Setup runs before any session exists, so it cannot carry a CSRF token;
+  // it is protected instead by only working while there are zero users.
+  router.post('/setup', async (request) => {
+    try {
+      const context = await app.install.completeSetup({
+        username: request.body['username'] ?? '',
+        email: request.body['email'] ?? '',
+        password: request.body['password'] ?? '',
+      });
+      const session = sessions.create(context.user.id);
+      return redirect('/tables', { 'set-cookie': sessionCookie(session.id) });
+    } catch (error) {
+      return redirect(withMessage('/setup', 'error', messageOf(error)));
+    }
+  });
+
+  // --- authentication ----------------------------------------------------
+
+  router.get('/login', async (request) => {
+    if (!(await app.install.isSetupComplete())) return redirect('/setup');
+    if (request.context) return redirect('/tables');
+    return html(
+      page(
+        { title: 'Sign in', ...messages(request) },
+        `<h1>Sign in</h1>
+         <section class="card"><form method="post" action="/login">
+           <label for="username">Username</label>
+           <input id="username" name="username" required autocomplete="username">
+           <label for="password">Password</label>
+           <input id="password" name="password" type="password" required autocomplete="current-password">
+           <button>Sign in</button>
+         </form></section>`,
+      ),
+    );
+  });
+
+  router.post('/login', async (request) => {
+    try {
+      const context = await app.auth.authenticate(
+        request.body['username'] ?? '',
+        request.body['password'] ?? '',
+      );
+      const session = sessions.create(context.user.id);
+      return redirect('/tables', { 'set-cookie': sessionCookie(session.id) });
+    } catch (error) {
+      return redirect(withMessage('/login', 'error', messageOf(error)));
+    }
+  });
+
+  router.post('/logout', async (request) => {
+    sessions.destroy(request.session?.id);
+    return redirect('/login', { 'set-cookie': clearedCookie() });
+  });
+
+  // --- data --------------------------------------------------------------
+
+  router.get('/tables', async (request) => {
+    const context = requireUser(request);
+    const tables = await app.metadata.listTables(context);
+    const namespaces = await app.metadata.listNamespaces(context);
+    const namespaceName = (id: string): string =>
+      namespaces.find((namespace) => namespace.id === id)?.name ?? '';
+
+    const rows = tables
+      .map(
+        (table) =>
+          `<tr><td><a href="/tables/${escapeHtml(table.id)}">${escapeHtml(table.label)}</a></td>
+             <td><code>${escapeHtml(namespaceName(table.namespaceId))}.${escapeHtml(table.name)}</code></td></tr>`,
+      )
+      .join('');
+
+    return html(
+      page(
+        { title: 'Data', context, ...messages(request) },
+        `<h1>Data</h1>
+         <p class="lede">Tables your security role can reach.</p>
+         ${
+           tables.length === 0
+             ? `<section class="card"><p class="muted">No tables are visible to the
+                 <strong>${escapeHtml(context.role.name)}</strong> role.${
+                   context.role.isSystem
+                     ? ' <a href="/admin">Create one in Setup</a>.'
+                     : ' A rule granting access has to be assigned to your role first.'
+                 }</p></section>`
+             : `<section class="card"><table><thead><tr><th>Table</th><th>API name</th></tr></thead>
+                 <tbody>${rows}</tbody></table></section>`
+         }`,
+      ),
+    );
+  });
+
+  router.get('/tables/:tableId', async (request) => {
+    const context = requireUser(request);
+    const tableId = request.params['tableId'] as string;
+    const table = await app.security.getTable(context, tableId);
+    const fields = await app.metadata.listReadableFields(context, table.id);
+    const records = await app.records.list(context, table.id, { limit: 200 });
+
+    const header = fields.map((field) => `<th>${escapeHtml(field.label)}</th>`).join('');
+    const rows = records
+      .map(
+        (record) =>
+          `<tr><td><a href="/records/${escapeHtml(record.id)}">Open</a></td>${fields
+            .map((field) => `<td>${escapeHtml(display(record.values[field.name]))}</td>`)
+            .join('')}</tr>`,
+      )
+      .join('');
+
+    return html(
+      page(
+        { title: table.label, context, ...messages(request) },
+        `<h1>${escapeHtml(table.label)}</h1>
+         <p class="lede">${records.length} record${records.length === 1 ? '' : 's'} visible to you.
+           <a href="/tables/${escapeHtml(table.id)}/new">New record</a></p>
+         <section class="card"><table><thead><tr><th></th>${header}</tr></thead>
+           <tbody>${rows || `<tr><td colspan="${fields.length + 1}" class="muted">Nothing to show.</td></tr>`}</tbody>
+         </table></section>`,
+      ),
+    );
+  });
+
+  router.get('/tables/:tableId/new', async (request) => {
+    const context = requireUser(request);
+    const tableId = request.params['tableId'] as string;
+    const table = await app.security.getTable(context, tableId);
+    const fields = await writableFields(app, context, table);
+
+    return html(
+      page(
+        { title: `New ${table.label}`, context, ...messages(request) },
+        `<h1>New ${escapeHtml(table.label)}</h1>
+         <section class="card"><form method="post" action="/tables/${escapeHtml(table.id)}/records">
+           ${csrfInput(request.session?.csrfToken)}
+           ${fields.map((field) => fieldInput(field, null)).join('')}
+           <button>Create</button>
+           <a class="button secondary" href="/tables/${escapeHtml(table.id)}">Cancel</a>
+         </form></section>`,
+      ),
+    );
+  });
+
+  router.post(
+    '/tables/:tableId/records',
+    action(
+      async (request) => {
+        const context = requireUser(request);
+        const tableId = request.params['tableId'] as string;
+        const table = await app.security.getTable(context, tableId);
+        const fields = await writableFields(app, context, table);
+        const record = await app.records.create(context, table.id, valuesFrom(request, fields));
+        throw new RedirectSignal(withMessage(`/records/${record.id}`, 'notice', 'Record created'));
+      },
+      (request) => `/tables/${request.params['tableId'] ?? ''}/new`,
+    ),
+  );
+
+  router.get('/records/:recordId', async (request) => {
+    const context = requireUser(request);
+    const recordId = request.params['recordId'] as string;
+    const record = await app.records.get(context, recordId);
+    const table = await app.security.getTable(context, record.tableId);
+    const fields = await writableFields(app, context, table);
+    const readable = await app.metadata.listReadableFields(context, table.id);
+
+    const details = readable
+      .map(
+        (field) =>
+          `<tr><th>${escapeHtml(field.label)}</th><td>${escapeHtml(
+            display(record.values[field.name]),
+          )}</td></tr>`,
+      )
+      .join('');
+
+    return html(
+      page(
+        { title: table.label, context, ...messages(request) },
+        `<h1>${escapeHtml(table.label)}</h1>
+         <p class="lede"><a href="/tables/${escapeHtml(table.id)}">Back to ${escapeHtml(
+           table.label,
+         )}</a> &middot; <code>${escapeHtml(record.id)}</code></p>
+         <section class="card"><table><tbody>${details}
+           <tr><th>Created</th><td>${escapeHtml(record.createdAt)}</td></tr>
+           <tr><th>Updated</th><td>${escapeHtml(record.updatedAt)}</td></tr></tbody></table></section>
+         ${
+           fields.length > 0
+             ? `<h2>Edit</h2><section class="card">
+                <form method="post" action="/records/${escapeHtml(record.id)}">
+                  ${csrfInput(request.session?.csrfToken)}
+                  ${fields.map((field) => fieldInput(field, record.values[field.name])).join('')}
+                  <button>Save</button>
+                </form>
+                <form method="post" action="/records/${escapeHtml(record.id)}/delete">
+                  ${csrfInput(request.session?.csrfToken)}
+                  <button class="danger">Delete record</button>
+                </form></section>`
+             : '<p class="muted">You have read-only access to this record.</p>'
+         }`,
+      ),
+    );
+  });
+
+  router.post(
+    '/records/:recordId',
+    action(
+      async (request) => {
+        const context = requireUser(request);
+        const recordId = request.params['recordId'] as string;
+        const record = await app.records.get(context, recordId);
+        const table = await app.security.getTable(context, record.tableId);
+        const fields = await writableFields(app, context, table);
+        await app.records.update(context, record.id, valuesFrom(request, fields));
+        return 'Record saved';
+      },
+      (request) => `/records/${request.params['recordId'] ?? ''}`,
+    ),
+  );
+
+  router.post(
+    '/records/:recordId/delete',
+    action(
+      async (request) => {
+        const context = requireUser(request);
+        const recordId = request.params['recordId'] as string;
+        const record = await app.records.get(context, recordId);
+        await app.records.delete(context, record.id);
+        throw new RedirectSignal(
+          withMessage(`/tables/${record.tableId}`, 'notice', 'Record deleted'),
+        );
+      },
+      (request) => `/records/${request.params['recordId'] ?? ''}`,
+    ),
+  );
+
+  registerAdminRoutes(router, app, { requireUser, action });
+}
+
+// --- setup / administration ---------------------------------------------
+
+interface AdminHelpers {
+  requireUser: (request: HttpRequest) => SecurityContext;
+  action: (
+    run: (request: HttpRequest) => Promise<string>,
+    fallback: (request: HttpRequest) => string,
+  ) => (request: HttpRequest) => Promise<HttpResponse>;
+}
+
+function registerAdminRoutes(router: Router, app: Application, helpers: AdminHelpers): void {
+  const { requireUser, action } = helpers;
+
+  router.get('/admin', async (request) => {
+    const context = requireUser(request);
+    app.security.assertAdministrator(context);
+
+    const [namespaces, roles, users, tables, rules] = await Promise.all([
+      app.metadata.listNamespaces(context),
+      app.metadata.listSecurityRoles(context),
+      app.metadata.listUsers(context),
+      app.metadata.listTables(context),
+      app.metadata.listSecurityRules(context),
+    ]);
+    const token = request.session?.csrfToken;
+    const roleName = (id: string): string => roles.find((role) => role.id === id)?.name ?? '';
+    const tableName = (id: string): string => tables.find((table) => table.id === id)?.label ?? '';
+    const customRoles = roles.filter((role) => !role.isSystem);
+
+    return html(
+      page(
+        { title: 'Setup', context, ...messages(request) },
+        `<h1>Setup</h1>
+         <p class="lede">Namespaces, roles, users, tables and security rules.</p>
+
+         <h2>Namespaces</h2>
+         <section class="card">
+           <table><thead><tr><th>Name</th><th>Label</th><th>Kind</th></tr></thead><tbody>
+             ${namespaces
+               .map(
+                 (namespace) =>
+                   `<tr><td><code>${escapeHtml(namespace.name)}</code></td><td>${escapeHtml(
+                     namespace.label,
+                   )}</td><td class="muted">${namespace.isSystem ? 'system' : 'package'}</td></tr>`,
+               )
+               .join('')}
+           </tbody></table>
+           <form method="post" action="/admin/namespaces">${csrfInput(token)}
+             <div class="row">
+               <div><label>API name</label><input name="name" required></div>
+               <div><label>Label</label><input name="label"></div>
+             </div><button>Add namespace</button></form>
+         </section>
+
+         <h2>Security roles</h2>
+         <section class="card">
+           <table><thead><tr><th>Role</th><th>Parent</th></tr></thead><tbody>
+             ${roles
+               .map(
+                 (role) =>
+                   `<tr><td>${escapeHtml(role.name)}${
+                     role.isSystem ? ' <span class="muted">(system)</span>' : ''
+                   }</td><td class="muted">${
+                     role.parentId ? escapeHtml(roleName(role.parentId)) : '&mdash;'
+                   }</td></tr>`,
+               )
+               .join('')}
+           </tbody></table>
+           <p class="muted">A role inherits the access of every role beneath it, which is why
+             Administrator &mdash; the only role without a parent &mdash; sees everything.</p>
+           <form method="post" action="/admin/roles">${csrfInput(token)}
+             <div class="row">
+               <div><label>Name</label><input name="name" required></div>
+               <div><label>Parent role</label><select name="parentId" required>
+                 ${optionList(roles.map((role) => ({ id: role.id, label: role.name })))}
+               </select></div>
+             </div><button>Add role</button></form>
+         </section>
+
+         <h2>Namespace access</h2>
+         <section class="card">
+           <p class="muted">Every role can reach <code>std</code>. Other namespaces need a grant.</p>
+           <form method="post" action="/admin/namespace-access">${csrfInput(token)}
+             <div class="row">
+               <div><label>Role</label><select name="roleId" required>
+                 ${optionList(customRoles.map((role) => ({ id: role.id, label: role.name })))}
+               </select></div>
+               <div><label>Namespace</label><select name="namespaceId" required>
+                 ${optionList(
+                   namespaces
+                     .filter((namespace) => !namespace.isSystem)
+                     .map((namespace) => ({ id: namespace.id, label: namespace.name })),
+                 )}
+               </select></div>
+             </div><button>Grant access</button></form>
+         </section>
+
+         <h2>Users</h2>
+         <section class="card">
+           <table><thead><tr><th>Username</th><th>Email</th><th>Role</th><th>Status</th></tr></thead><tbody>
+             ${users
+               .map(
+                 (user) =>
+                   `<tr><td>${escapeHtml(user.username)}</td><td>${escapeHtml(
+                     user.email,
+                   )}</td><td>${escapeHtml(roleName(user.securityRoleId))}</td><td class="muted">${
+                     user.isActive ? 'active' : 'inactive'
+                   }</td></tr>`,
+               )
+               .join('')}
+           </tbody></table>
+           <form method="post" action="/admin/users">${csrfInput(token)}
+             <div class="row">
+               <div><label>Username</label><input name="username" required minlength="3"></div>
+               <div><label>Email</label><input name="email" type="email" required></div>
+             </div>
+             <div class="row">
+               <div><label>Password</label><input name="password" type="password" required minlength="8"></div>
+               <div><label>Role</label><select name="securityRoleId" required>
+                 ${optionList(roles.map((role) => ({ id: role.id, label: role.name })))}
+               </select></div>
+             </div><button>Add user</button></form>
+         </section>
+
+         <h2>Tables</h2>
+         <section class="card">
+           <table><thead><tr><th>Table</th><th>Namespace</th></tr></thead><tbody>
+             ${tables
+               .map(
+                 (table) =>
+                   `<tr><td><a href="/admin/tables/${escapeHtml(table.id)}">${escapeHtml(
+                     table.label,
+                   )}</a></td><td class="muted"><code>${escapeHtml(
+                     namespaces.find((namespace) => namespace.id === table.namespaceId)?.name ?? '',
+                   )}</code></td></tr>`,
+               )
+               .join('')}
+           </tbody></table>
+           <form method="post" action="/admin/tables">${csrfInput(token)}
+             <div class="row">
+               <div><label>API name</label><input name="name" required></div>
+               <div><label>Label</label><input name="label"></div>
+               <div><label>Namespace</label><select name="namespaceId" required>
+                 ${optionList(namespaces.map((namespace) => ({ id: namespace.id, label: namespace.name })))}
+               </select></div>
+             </div><button>Add table</button></form>
+         </section>
+
+         <h2>Security rules</h2>
+         <section class="card">
+           <table><thead><tr><th>Rule</th><th>Table</th><th>Access</th><th>Match</th></tr></thead><tbody>
+             ${
+               rules
+                 .map(
+                   (rule) =>
+                     `<tr><td>${escapeHtml(rule.name)}</td><td>${escapeHtml(
+                       tableName(rule.tableId),
+                     )}</td><td class="muted">${escapeHtml(
+                       rule.accessTypes.join(', '),
+                     )}</td><td class="muted">${escapeHtml(rule.clauseMatch)}</td></tr>`,
+                 )
+                 .join('') || '<tr><td colspan="4" class="muted">No rules yet.</td></tr>'
+             }
+           </tbody></table>
+           <p class="muted">Build a rule on a table&rsquo;s page, then assign it to a role here.</p>
+           <form method="post" action="/admin/role-rules">${csrfInput(token)}
+             <div class="row">
+               <div><label>Role</label><select name="roleId" required>
+                 ${optionList(customRoles.map((role) => ({ id: role.id, label: role.name })))}
+               </select></div>
+               <div><label>Rule</label><select name="ruleId" required>
+                 ${optionList(rules.map((rule) => ({ id: rule.id, label: rule.name })))}
+               </select></div>
+             </div><button>Assign rule to role</button></form>
+         </section>`,
+      ),
+    );
+  });
+
+  router.get('/admin/tables/:tableId', async (request) => {
+    const context = requireUser(request);
+    app.security.assertAdministrator(context);
+    const tableId = request.params['tableId'] as string;
+    const table = await app.security.getTable(context, tableId);
+    const fields = await app.security.listAllFields(context, table.id);
+    const token = request.session?.csrfToken;
+    const fieldOptions = fields.map((field) => ({ id: field.id, label: field.name }));
+    const tables = await app.metadata.listTables(context);
+
+    return html(
+      page(
+        { title: table.label, context, ...messages(request) },
+        `<h1>${escapeHtml(table.label)}</h1>
+         <p class="lede"><a href="/admin">Back to setup</a> &middot;
+           <a href="/tables/${escapeHtml(table.id)}">View data</a></p>
+
+         <h2>Fields</h2>
+         <section class="card">
+           <table><thead><tr><th>Name</th><th>Label</th><th>Type</th><th>Required</th></tr></thead><tbody>
+             ${
+               fields
+                 .map(
+                   (field) =>
+                     `<tr><td><code>${escapeHtml(field.name)}</code></td><td>${escapeHtml(
+                       field.label,
+                     )}</td><td class="muted">${escapeHtml(field.type)}</td><td class="muted">${
+                       field.isRequired ? 'yes' : 'no'
+                     }</td></tr>`,
+                 )
+                 .join('') || '<tr><td colspan="4" class="muted">No fields yet.</td></tr>'
+             }
+           </tbody></table>
+           <form method="post" action="/admin/fields">${csrfInput(token)}
+             <input type="hidden" name="tableId" value="${escapeHtml(table.id)}">
+             <div class="row">
+               <div><label>API name</label><input name="name" required></div>
+               <div><label>Label</label><input name="label"></div>
+               <div><label>Type</label><select name="type">
+                 ${optionList(Object.values(FieldType).map((type) => ({ id: type, label: type })))}
+               </select></div>
+             </div>
+             <div class="row">
+               <div><label>Reference target (reference fields only)</label>
+                 <select name="referenceTableId">
+                   <option value="">&mdash;</option>
+                   ${optionList(tables.map((other) => ({ id: other.id, label: other.label })))}
+                 </select></div>
+               <div><label>Required</label><select name="isRequired">
+                 <option value="">No</option><option value="on">Yes</option></select></div>
+             </div>
+             <button>Add field</button></form>
+         </section>
+
+         <h2>New security rule</h2>
+         <section class="card">
+           <p class="muted">A rule grants access to records of this table that satisfy its clauses,
+             and to the fields it names. Leave the clauses empty to cover every record.</p>
+           <form method="post" action="/admin/rules">${csrfInput(token)}
+             <input type="hidden" name="tableId" value="${escapeHtml(table.id)}">
+             <label>Rule name</label><input name="name" required>
+             <div class="row">
+               <div><label>Access</label>
+                 <select name="accessTypes" multiple size="3">
+                   ${optionList(
+                     Object.values(AccessType).map((access) => ({ id: access, label: access })),
+                   )}
+                 </select></div>
+               <div><label>Clause matching</label><select name="clauseMatch">
+                 ${optionList(Object.values(ClauseMatch).map((match) => ({ id: match, label: match })))}
+               </select>
+               <label>Custom logic (e.g. <code>1 AND (2 OR 3)</code>)</label>
+               <input name="clauseLogic" placeholder="only used when matching is custom"></div>
+             </div>
+             <label>Fields this rule grants</label>
+             <select name="fieldIds" multiple size="${Math.min(6, Math.max(2, fields.length))}">
+               ${optionList(fieldOptions)}
+             </select>
+             ${[1, 2, 3]
+               .map(
+                 (index) => `<h2>Clause ${index}</h2>
+               <div class="row">
+                 <div><label>Field</label><select name="clause${index}Field">
+                   <option value="">&mdash; no clause &mdash;</option>${optionList(fieldOptions)}
+                 </select></div>
+                 <div><label>Operator</label><select name="clause${index}Operator">
+                   ${optionList(
+                     Object.values(ClauseOperator).map((operator) => ({
+                       id: operator,
+                       label: operator,
+                     })),
+                   )}
+                 </select></div>
+                 <div><label>Target value</label>
+                   <input name="clause${index}Value" placeholder="$user.id, 0, ..."></div>
+                 <div><label>&hellip; or compare to field</label>
+                   <select name="clause${index}CompareField">
+                     <option value="">&mdash;</option>${optionList(fieldOptions)}
+                   </select></div>
+               </div>`,
+               )
+               .join('')}
+             <button>Create rule</button>
+           </form>
+         </section>`,
+      ),
+    );
+  });
+
+  const adminAction = (run: (request: HttpRequest, context: SecurityContext) => Promise<string>) =>
+    action(async (request) => {
+      const context = requireUser(request);
+      app.security.assertAdministrator(context);
+      return run(request, context);
+    }, backTo);
+
+  router.post(
+    '/admin/namespaces',
+    adminAction(async (request, context) => {
+      await app.metadata.createNamespace(context, {
+        name: request.body['name'] ?? '',
+        label: request.body['label'] ?? '',
+      });
+      return 'Namespace created';
+    }),
+  );
+
+  router.post(
+    '/admin/roles',
+    adminAction(async (request, context) => {
+      await app.metadata.createSecurityRole(context, {
+        name: request.body['name'] ?? '',
+        parentId: request.body['parentId'] ?? '',
+      });
+      return 'Role created';
+    }),
+  );
+
+  router.post(
+    '/admin/namespace-access',
+    adminAction(async (request, context) => {
+      await app.metadata.grantNamespaceAccess(
+        context,
+        request.body['roleId'] ?? '',
+        request.body['namespaceId'] ?? '',
+      );
+      return 'Namespace access granted';
+    }),
+  );
+
+  router.post(
+    '/admin/users',
+    adminAction(async (request, context) => {
+      await app.metadata.createUser(context, {
+        username: request.body['username'] ?? '',
+        email: request.body['email'] ?? '',
+        password: request.body['password'] ?? '',
+        securityRoleId: request.body['securityRoleId'] ?? '',
+      });
+      return 'User created';
+    }),
+  );
+
+  router.post(
+    '/admin/tables',
+    adminAction(async (request, context) => {
+      const table = await app.metadata.createTable(context, {
+        namespaceId: request.body['namespaceId'] ?? '',
+        name: request.body['name'] ?? '',
+        label: request.body['label'] ?? '',
+      });
+      throw new RedirectSignal(
+        withMessage(`/admin/tables/${table.id}`, 'notice', 'Table created; now add fields'),
+      );
+    }),
+  );
+
+  router.post(
+    '/admin/fields',
+    adminAction(async (request, context) => {
+      const tableId = request.body['tableId'] ?? '';
+      await app.metadata.createField(context, {
+        tableId,
+        name: request.body['name'] ?? '',
+        label: request.body['label'] ?? '',
+        type: (request.body['type'] ?? FieldType.Text) as FieldType,
+        isRequired: request.body['isRequired'] === 'on',
+        referenceTableId: request.body['referenceTableId'] || null,
+      });
+      return 'Field created';
+    }),
+  );
+
+  router.post(
+    '/admin/rules',
+    adminAction(async (request, context) => {
+      const body = request.body;
+      const clauses = [1, 2, 3]
+        .map((index) => ({
+          fieldId: body[`clause${index}Field`] ?? '',
+          operator: (body[`clause${index}Operator`] ?? ClauseOperator.Equals) as ClauseOperator,
+          targetValue: body[`clause${index}Value`] || null,
+          compareFieldId: body[`clause${index}CompareField`] || null,
+        }))
+        .filter((clause) => clause.fieldId.length > 0);
+
+      await app.metadata.createSecurityRule(context, {
+        name: body['name'] ?? '',
+        tableId: body['tableId'] ?? '',
+        accessTypes: multi(request, 'accessTypes') as AccessType[],
+        clauseMatch: (body['clauseMatch'] ?? ClauseMatch.All) as ClauseMatch,
+        clauseLogic: body['clauseLogic'] || null,
+        clauses,
+        fieldIds: multi(request, 'fieldIds'),
+      });
+      return 'Rule created';
+    }),
+  );
+
+  router.post(
+    '/admin/role-rules',
+    adminAction(async (request, context) => {
+      await app.metadata.assignRuleToRole(
+        context,
+        request.body['roleId'] ?? '',
+        request.body['ruleId'] ?? '',
+      );
+      return 'Rule assigned to role';
+    }),
+  );
+}
+
+// --- helpers -------------------------------------------------------------
+
+/**
+ * Fields the user may write. For an administrator that is every field; for
+ * anyone else it is the union of the fields granted by rules that give edit
+ * access, which the security layer would enforce anyway.
+ */
+async function writableFields(
+  app: Application,
+  context: SecurityContext,
+  table: TableDef,
+): Promise<FieldDef[]> {
+  if (context.role.isSystem) return app.security.listAllFields(context, table.id);
+  const permissions = await app.security.permissions(context);
+  const rules = (permissions.rulesByTable.get(table.id) ?? []).filter((rule) =>
+    rule.accessTypes.has(AccessType.Edit),
+  );
+  const granted = new Set<string>();
+  for (const rule of rules) for (const fieldId of rule.fieldIds) granted.add(fieldId);
+  const readable = await app.metadata.listReadableFields(context, table.id);
+  return readable.filter((field) => granted.has(field.id));
+}
+
+function valuesFrom(request: HttpRequest, fields: FieldDef[]): Record<string, unknown> {
+  const values: Record<string, unknown> = {};
+  for (const field of fields) {
+    const raw = request.body[`field_${field.name}`];
+    if (raw === undefined) continue;
+    if (field.type === FieldType.Boolean) values[field.name] = raw === 'on' ? 'true' : 'false';
+    else values[field.name] = raw;
+  }
+  return values;
+}
+
+function fieldInput(field: FieldDef, current: unknown): string {
+  const name = `field_${field.name}`;
+  const label = `<label for="${escapeHtml(name)}">${escapeHtml(field.label)}${
+    field.isRequired ? ' *' : ''
+  }</label>`;
+  const value = escapeHtml(display(current));
+
+  switch (field.type) {
+    case FieldType.Boolean:
+      return `${label}<select id="${escapeHtml(name)}" name="${escapeHtml(name)}">
+        <option value="off"${current === true ? '' : ' selected'}>No</option>
+        <option value="on"${current === true ? ' selected' : ''}>Yes</option></select>`;
+    case FieldType.Number:
+      return `${label}<input id="${escapeHtml(name)}" name="${escapeHtml(
+        name,
+      )}" type="number" step="any" value="${value}"${field.isRequired ? ' required' : ''}>`;
+    case FieldType.Date:
+      return `${label}<input id="${escapeHtml(name)}" name="${escapeHtml(
+        name,
+      )}" type="date" value="${value}"${field.isRequired ? ' required' : ''}>`;
+    case FieldType.DateTime:
+      return `${label}<input id="${escapeHtml(name)}" name="${escapeHtml(
+        name,
+      )}" value="${value}" placeholder="2026-01-31T09:00:00Z"${field.isRequired ? ' required' : ''}>`;
+    default:
+      return `${label}<input id="${escapeHtml(name)}" name="${escapeHtml(name)}" value="${value}"${
+        field.isRequired ? ' required' : ''
+      }>`;
+  }
+}
+
+function display(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  return String(value);
+}
+
+/** Multi-selects arrive as repeated keys, which the body parser keeps intact. */
+function multi(request: HttpRequest, name: string): string[] {
+  return (request.bodyList[name] ?? []).filter((value) => value.length > 0);
+}
+
+function messages(request: HttpRequest): { error: string | null; notice: string | null } {
+  return {
+    error: request.query.get('error'),
+    notice: request.query.get('notice'),
+  };
+}
+
+function withMessage(path: string, kind: 'error' | 'notice', message: string): string {
+  if (!message) return path;
+  const separator = path.includes('?') ? '&' : '?';
+  return `${path}${separator}${kind}=${encodeURIComponent(message)}`;
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : 'Something went wrong';
+}
+
+function backTo(request: HttpRequest): string {
+  const referer = request.headers['referer'];
+  if (referer) {
+    try {
+      return new URL(referer).pathname;
+    } catch {
+      // fall through
+    }
+  }
+  return '/admin';
+}

@@ -1,0 +1,16 @@
+services:
+  cumulo:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      # Where the SQLite database lives inside the container.
+      CUMULO_DATABASE_FILE: /data/cumulo.db
+      PORT: "3000"
+    volumes:
+      # Keeps the installation across `docker compose up --build`.
+      - cumulo-data:/data
+    restart: unless-stopped
+
+volumes:
+  cumulo-data:
