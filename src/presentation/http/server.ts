@@ -1,5 +1,7 @@
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { Application } from '../../app/Application.js';
+import type { FeatureFlags } from '../../config.js';
+import { UniqueConstraintError } from '../../db/types.js';
 import { SecurityError, AccessDeniedError, NotFoundError, ValidationError } from '../../security/errors.js';
 import { registerWebRoutes } from '../web/routes.js';
 import { RedirectSignal } from './signals.js';
@@ -10,7 +12,13 @@ import type { HttpMethod, HttpRequest, HttpResponse } from './types.js';
 export interface ServerOptions {
   /** Rejects request bodies larger than this, in bytes. */
   maxBodyBytes?: number;
+  /** Defaults to everything off. */
+  features?: Partial<FeatureFlags>;
 }
+
+const DEFAULT_FEATURES: FeatureFlags = {
+  namespaceCreation: false,
+};
 
 const DEFAULT_MAX_BODY = 1024 * 256;
 
@@ -22,7 +30,11 @@ const DEFAULT_MAX_BODY = 1024 * 256;
  * whatever the route produced. Adding a JSON API means registering another
  * set of routes on this same router -- the plumbing here does not change.
  */
-export function buildRouter(app: Application, sessions: SessionStore): Router {
+export function buildRouter(
+  app: Application,
+  sessions: SessionStore,
+  features: FeatureFlags = DEFAULT_FEATURES,
+): Router {
   const router = new Router();
   // A dependency-free liveness probe, which is also what the container's
   // HEALTHCHECK calls.
@@ -31,13 +43,13 @@ export function buildRouter(app: Application, sessions: SessionStore): Router {
     headers: { 'content-type': 'application/json; charset=utf-8' },
     body: JSON.stringify({ status: 'ok' }),
   }));
-  registerWebRoutes(router, app, sessions);
+  registerWebRoutes(router, app, sessions, features);
   return router;
 }
 
 export function createServer(app: Application, options: ServerOptions = {}): Server {
   const sessions = new SessionStore();
-  const router = buildRouter(app, sessions);
+  const router = buildRouter(app, sessions, { ...DEFAULT_FEATURES, ...options.features });
   const maxBody = options.maxBodyBytes ?? DEFAULT_MAX_BODY;
 
   return createHttpServer((incoming, outgoing) => {
@@ -118,12 +130,19 @@ export function statusFor(error: unknown): number {
   if (error instanceof NotFoundError) return 404;
   if (error instanceof ValidationError) return 400;
   if (error instanceof SecurityError) return 403;
+  // A constraint that reached storage is a conflict, not a server fault.
+  if (error instanceof UniqueConstraintError) return 409;
   return 500;
 }
 
 function errorResponse(error: unknown): HttpResponse {
   const status = statusFor(error);
-  const message = error instanceof Error ? error.message : 'Unexpected error';
+  const message =
+    error instanceof UniqueConstraintError
+      ? 'That already exists.'
+      : error instanceof Error
+        ? error.message
+        : 'Unexpected error';
   return {
     status,
     headers: { 'content-type': 'text/plain; charset=utf-8' },

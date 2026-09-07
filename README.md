@@ -31,6 +31,7 @@ docker run -p 3000:3000 -v cumulo-data:/data cumulo
 | `PORT` | `3000` | Port to listen on |
 | `HOST` | `0.0.0.0` | Interface to bind |
 | `CUMULO_DATABASE_FILE` | `data/cumulo.db` (`/data/cumulo.db` in the image) | SQLite file |
+| `CUMULO_ENABLE_NAMESPACE_CREATION` | off | Lets the console create namespaces. For testing: a namespace should arrive with a package. |
 
 `GET /healthz` is a dependency-free liveness probe, and is what the image's
 `HEALTHCHECK` calls.
@@ -53,10 +54,14 @@ A fresh installation has one namespace (`std`), one security role
 user created there is locked to the Administrator role -- an installation
 whose only user could not administer it would be stranded.
 
-From `/setup` (the console, once signed in) an administrator can add
-namespaces, roles, users, tables, fields and security rules. `/tables` is the
-data side: the tables the signed-in role can reach, and the records within them
-that its rules allow.
+From `/setup` (the console, once signed in) an administrator can add roles,
+users, tables, fields and security rules, and `/admin/roles` shows the role
+hierarchy as a tree. `/tables` is the data side: the tables the signed-in role
+can reach, and the records within them that its rules allow.
+
+Namespaces are not created here. They are meant to arrive with a package, so
+the console only lists them; set `CUMULO_ENABLE_NAMESPACE_CREATION=true` to add
+one by hand while testing.
 
 ## The layers
 
@@ -153,6 +158,19 @@ Clause target values understand `$user.id`, `$user.username` and
 `$user.securityRoleId`, which is how you write "records this user owns"
 without hard-coding anyone.
 
+## Tables have no standard fields
+
+A new table has no fields at all -- there is no hidden `Name`, `Owner` or
+`CreatedBy`. What every record carries is the three columns on the `record` row
+itself: `id`, `createdAt` and `updatedAt`. Those are always returned and always
+visible, but they are not `field` rows, so they cannot be granted, and a
+security rule clause cannot refer to them.
+
+The practical consequence is that ownership is something you build: a rule
+saying "records this user owns" needs a field on the table holding the user id,
+which an administrator creates like any other, and a clause comparing it to
+`$user.id`.
+
 ## Lookups
 
 A field of type `reference` is a **lookup**: it points at a record in the table
@@ -179,7 +197,7 @@ and none of them owns anything.
 npm test
 ```
 
-59 tests over the adapter, the clause-logic parser, the security layer
+64 tests over the adapter, the clause-logic parser, the security layer
 (hierarchy inheritance, record filtering, per-field grants and the ceiling over
 them, namespace gating, metadata protection), lookups, the rename migration,
 and the HTTP surface end to end.

@@ -171,6 +171,13 @@ export class MetadataService {
       }
       const namespace = await store.getNamespace(namespaceId);
       if (!namespace) throw new ValidationError('Namespace does not exist');
+
+      // Granting twice is not an error: the end state is what was asked for.
+      const existing = (await store.listNamespaceAccessForRoles([role.id])).find(
+        (access) => access.namespaceId === namespace.id,
+      );
+      if (existing) return existing;
+
       const access: NamespaceAccess = {
         id: newId(),
         securityRoleId: role.id,
@@ -456,6 +463,13 @@ export class MetadataService {
       }
       const rule = await store.getSecurityRule(ruleId);
       if (!rule) throw new ValidationError('Rule does not exist');
+
+      // As with namespace access, assigning twice simply leaves it assigned.
+      const existing = (await store.listSecurityRoleRulesForRoles([role.id])).find(
+        (link) => link.securityRuleId === rule.id,
+      );
+      if (existing) return existing;
+
       const link: SecurityRoleRule = {
         id: newId(),
         securityRoleId: role.id,
@@ -512,6 +526,22 @@ export class MetadataService {
           })),
       }));
     });
+  }
+
+  /** Every namespace grant, for the console to show what a role already has. */
+  async listNamespaceAccess(context: SecurityContext): Promise<NamespaceAccess[]> {
+    return this.security.readAsAdministrator(context, async (store) =>
+      store.listNamespaceAccessForRoles((await store.listSecurityRoles()).map((role) => role.id)),
+    );
+  }
+
+  /** Every rule assignment, likewise. */
+  async listRoleRules(context: SecurityContext): Promise<SecurityRoleRule[]> {
+    return this.security.readAsAdministrator(context, async (store) =>
+      store.listSecurityRoleRulesForRoles(
+        (await store.listSecurityRoles()).map((role) => role.id),
+      ),
+    );
   }
 
   async listSecurityRules(context: SecurityContext): Promise<SecurityRule[]> {

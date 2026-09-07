@@ -250,8 +250,22 @@ This is the pattern to copy rather than the mechanism to reuse. A third or
 fourth of these wants a real migrations directory and a schema-version row,
 not more one-off methods on `InstallService`.
 
+## Standard fields, and the lack of them
+
+A table is created empty. `record` carries `id`, `createdAt` and `updatedAt` as
+real columns, and `project()` always includes them, but they are not `field`
+rows: they have no `securityRuleFieldGrant`, and `SecurityRuleClause.fieldId`
+cannot point at them.
+
+Adding a standard set (`name`, `ownerId`, `createdById`, `lastModifiedById`)
+would mean seeding `field` rows whenever a table is created, and deciding who
+may see and change them -- ownership in particular is a security question, not
+just a column. Until that is decided, ownership is modelled by hand: a field
+holding a user id, and a clause comparing it to `$user.id`.
+
 ## What is deliberately not built
 
+- Standard fields on new tables, and with them an ownership model
 - Editing and deleting metadata (only creation and a few guarded deletes exist)
 - A query language over records; listing is table-scoped with a limit
 - Packaging/installing a namespace as a unit

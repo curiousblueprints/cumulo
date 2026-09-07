@@ -986,3 +986,28 @@ test('delete access alone does not make a field writable', async () => {
   assert.equal((await app.records.list(admin, table.id)).length, 0);
   await app.stop();
 });
+
+test('granting access or assigning a rule twice leaves one row, not an error', async () => {
+  const { app, admin } = await installed();
+  const { std, table } = await invoiceTable(app, admin);
+  const role = await app.metadata.createSecurityRole(admin, {
+    name: 'Repeat',
+    parentId: admin.role.id,
+  });
+
+  const first = await app.metadata.grantNamespaceAccess(admin, role.id, std.id);
+  const second = await app.metadata.grantNamespaceAccess(admin, role.id, std.id);
+  assert.equal(first.id, second.id);
+  assert.equal((await app.metadata.listNamespaceAccess(admin)).length, 1);
+
+  const rule = await app.metadata.createSecurityRule(admin, {
+    name: 'Some rule',
+    tableId: table.id,
+    accessTypes: [AccessType.Read],
+  });
+  const linkA = await app.metadata.assignRuleToRole(admin, role.id, rule.id);
+  const linkB = await app.metadata.assignRuleToRole(admin, role.id, rule.id);
+  assert.equal(linkA.id, linkB.id);
+  assert.equal((await app.metadata.listRoleRules(admin)).length, 1);
+  await app.stop();
+});

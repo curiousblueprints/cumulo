@@ -1,8 +1,23 @@
 import type { ApplicationConfig } from './app/Application.js';
 
+/** Optional behaviour that is off unless the environment turns it on. */
+export interface FeatureFlags {
+  /**
+   * Lets the setup console create namespaces. Off by default: namespaces
+   * arrive with a package, not by hand. On for testing, via
+   * CUMULO_ENABLE_NAMESPACE_CREATION=true.
+   */
+  namespaceCreation: boolean;
+}
+
 export interface ServerConfig extends ApplicationConfig {
   host: string;
   port: number;
+  features: FeatureFlags;
+}
+
+function flag(raw: string | undefined): boolean {
+  return ['1', 'true', 'yes', 'on'].includes((raw ?? '').trim().toLowerCase());
 }
 
 /**
@@ -21,6 +36,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     database: {
       driver: 'sqlite',
       file: env['CUMULO_DATABASE_FILE'] ?? 'data/cumulo.db',
+    },
+    features: {
+      namespaceCreation: flag(env['CUMULO_ENABLE_NAMESPACE_CREATION']),
     },
   };
 }

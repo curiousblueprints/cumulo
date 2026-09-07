@@ -39,9 +39,11 @@ class Client {
   }
 }
 
-async function serve(): Promise<{ app: Application; base: string; close: () => Promise<void> }> {
+async function serve(
+  features?: { namespaceCreation?: boolean },
+): Promise<{ app: Application; base: string; close: () => Promise<void> }> {
   const app = await Application.start({ database: { driver: 'sqlite', file: ':memory:' } });
-  const server = createServer(app);
+  const server = createServer(app, features ? { features } : {});
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;
   // A test that fails before close() would otherwise keep the runner alive.
@@ -350,5 +352,117 @@ test('a lookup field renders as a picker of records the user can see', async () 
   const detail = await (await client.get(recordPath)).text();
   // The lookup links through to the record it points at.
   assert.match(detail, new RegExp(`href="/records/${acme.id}"`));
+  await close();
+});
+
+test('namespace creation is hidden and refused unless the flag is set', async () => {
+  const { app, base, close } = await serve();
+  const client = new Client(base);
+  await client.post('/setup', { username: 'root', email: 'r@e.com', password: 'correct horse' });
+
+  const console_ = await (await client.get('/admin')).text();
+  assert.doesNotMatch(console_, /action="\/admin\/namespaces"/);
+  assert.match(console_, /arrive with a package/);
+
+  // The bare POST is refused too, not just hidden.
+  const refused = await client.post('/admin/namespaces', {
+    _csrf: csrf(console_),
+    name: 'acme',
+  });
+  assert.match(decodeURIComponent(refused.headers.get('location') ?? ''), /disabled/i);
+  assert.deepEqual(
+    (await app.metadata.listNamespaces(await app.auth.authenticate('root', 'correct horse'))).map(
+      (namespace) => namespace.name,
+    ),
+    ['std'],
+  );
+  await close();
+});
+
+test('the flag turns namespace creation back on', async () => {
+  const { app, base, close } = await serve({ namespaceCreation: true });
+  const client = new Client(base);
+  await client.post('/setup', { username: 'root', email: 'r@e.com', password: 'correct horse' });
+
+  const console_ = await (await client.get('/admin')).text();
+  assert.match(console_, /action="\/admin\/namespaces"/);
+  await client.post('/admin/namespaces', { _csrf: csrf(console_), name: 'acme', label: 'Acme' });
+
+  const admin = await app.auth.authenticate('root', 'correct horse');
+  assert.deepEqual(
+    (await app.metadata.listNamespaces(admin)).map((namespace) => namespace.name).sort(),
+    ['acme', 'std'],
+  );
+  await close();
+});
+
+test('granting the same namespace access twice is not an error', async () => {
+  const { app, base, close } = await serve({ namespaceCreation: true });
+  const client = new Client(base);
+  await client.post('/setup', { username: 'root', email: 'r@e.com', password: 'correct horse' });
+  const admin = await app.auth.authenticate('root', 'correct horse');
+  const acme = await app.metadata.createNamespace(admin, { name: 'acme' });
+  const role = await app.metadata.createSecurityRole(admin, {
+    name: 'Child',
+    parentId: admin.role.id,
+  });
+
+  const page = await (await client.get('/admin')).text();
+  const token = csrf(page);
+  for (const _attempt of [1, 2]) {
+    const response = await client.post('/admin/namespace-access', {
+      _csrf: token,
+      roleId: role.id,
+      namespaceId: acme.id,
+    });
+    const location = decodeURIComponent(response.headers.get('location') ?? '');
+    // Never a raw storage message such as "UNIQUE constraint failed".
+    assert.doesNotMatch(location, /constraint/i);
+    assert.match(location, /notice=/);
+  }
+  assert.equal((await app.metadata.listNamespaceAccess(admin)).length, 1);
+
+  // ...and the console shows the grant, which is what made the repeat likely.
+  const after = await (await client.get('/admin')).text();
+  assert.match(after, /Child/);
+  assert.match(after, /acme/);
+  await close();
+});
+
+test('the role hierarchy page nests roles under their parents', async () => {
+  const { app, base, close } = await serve();
+  const client = new Client(base);
+  await client.post('/setup', { username: 'root', email: 'r@e.com', password: 'correct horse' });
+  const admin = await app.auth.authenticate('root', 'correct horse');
+
+  const manager = await app.metadata.createSecurityRole(admin, {
+    name: 'Manager',
+    parentId: admin.role.id,
+  });
+  const rep = await app.metadata.createSecurityRole(admin, {
+    name: 'Rep',
+    parentId: manager.id,
+  });
+  await app.metadata.createUser(admin, {
+    username: 'ricky',
+    email: 'ricky@e.com',
+    password: 'password123',
+    securityRoleId: rep.id,
+  });
+
+  const tree = await (await client.get('/admin/roles')).text();
+  // Administrator contains Manager contains Rep, in that nesting order.
+  const administratorAt = tree.indexOf('Administrator');
+  const managerAt = tree.indexOf('Manager');
+  const repAt = tree.indexOf('Rep');
+  assert.ok(administratorAt < managerAt && managerAt < repAt);
+  assert.match(tree, /<ul[^>]*>[\s\S]*<ul>[\s\S]*<ul>/);
+  assert.match(tree, /1 user/);
+  assert.match(tree, /all access/);
+
+  // It is administrative, like the rest of setup.
+  const stranger = new Client(base);
+  await stranger.post('/login', { username: 'ricky', password: 'password123' });
+  assert.equal((await stranger.get('/admin/roles')).status, 403);
   await close();
 });

@@ -1,4 +1,6 @@
 import type { Application } from '../../app/Application.js';
+import type { FeatureFlags } from '../../config.js';
+import { DatabaseError, UniqueConstraintError } from '../../db/types.js';
 import {
   AccessType,
   ClauseMatch,
@@ -7,6 +9,7 @@ import {
   FieldType,
   type FieldDef,
   type RecordView,
+  type SecurityRole,
 } from '../../domain/types.js';
 import type { SecurityContext } from '../../security/context.js';
 import { AccessDeniedError } from '../../security/errors.js';
@@ -22,7 +25,12 @@ import { csrfInput, escapeHtml, optionList, page } from './layout.js';
  * Handlers only ever call application services, never the store or the
  * database. Every mutation is a form POST guarded by the session's CSRF token.
  */
-export function registerWebRoutes(router: Router, app: Application, sessions: SessionStore): void {
+export function registerWebRoutes(
+  router: Router,
+  app: Application,
+  sessions: SessionStore,
+  features: FeatureFlags,
+): void {
   const requireUser = (request: HttpRequest): SecurityContext => {
     if (!request.context) throw new RedirectSignal('/login');
     return request.context;
@@ -329,12 +337,13 @@ export function registerWebRoutes(router: Router, app: Application, sessions: Se
     ),
   );
 
-  registerAdminRoutes(router, app, { requireUser, action });
+  registerAdminRoutes(router, app, { requireUser, action, features });
 }
 
 // --- setup / administration ---------------------------------------------
 
 interface AdminHelpers {
+  features: FeatureFlags;
   requireUser: (request: HttpRequest) => SecurityContext;
   action: (
     run: (request: HttpRequest) => Promise<string>,
@@ -343,19 +352,22 @@ interface AdminHelpers {
 }
 
 function registerAdminRoutes(router: Router, app: Application, helpers: AdminHelpers): void {
-  const { requireUser, action } = helpers;
+  const { requireUser, action, features } = helpers;
 
   router.get('/admin', async (request) => {
     const context = requireUser(request);
     app.security.assertAdministrator(context);
 
-    const [namespaces, roles, users, tables, rules] = await Promise.all([
-      app.metadata.listNamespaces(context),
-      app.metadata.listSecurityRoles(context),
-      app.metadata.listUsers(context),
-      app.metadata.listTables(context),
-      app.metadata.listSecurityRules(context),
-    ]);
+    const [namespaces, roles, users, tables, rules, namespaceAccess, roleRules] =
+      await Promise.all([
+        app.metadata.listNamespaces(context),
+        app.metadata.listSecurityRoles(context),
+        app.metadata.listUsers(context),
+        app.metadata.listTables(context),
+        app.metadata.listSecurityRules(context),
+        app.metadata.listNamespaceAccess(context),
+        app.metadata.listRoleRules(context),
+      ]);
     const token = request.session?.csrfToken;
     const roleName = (id: string): string => roles.find((role) => role.id === id)?.name ?? '';
     const tableName = (id: string): string => tables.find((table) => table.id === id)?.label ?? '';
@@ -379,11 +391,18 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
                )
                .join('')}
            </tbody></table>
-           <form method="post" action="/admin/namespaces">${csrfInput(token)}
-             <div class="row">
-               <div><label>API name</label><input name="name" required></div>
-               <div><label>Label</label><input name="label"></div>
-             </div><button>Add namespace</button></form>
+           ${
+             features.namespaceCreation
+               ? `<p class="muted">Namespace creation is enabled for testing
+                    (<code>CUMULO_ENABLE_NAMESPACE_CREATION</code>).</p>
+                  <form method="post" action="/admin/namespaces">${csrfInput(token)}
+                    <div class="row">
+                      <div><label>API name</label><input name="name" required></div>
+                      <div><label>Label</label><input name="label"></div>
+                    </div><button>Add namespace</button></form>`
+               : `<p class="muted">Namespaces arrive with a package rather than by hand, so
+                    there is nothing to add here yet.</p>`
+           }
          </section>
 
          <h2>Security roles</h2>
@@ -401,7 +420,8 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
                .join('')}
            </tbody></table>
            <p class="muted">A role inherits the access of every role beneath it, which is why
-             Administrator &mdash; the only role without a parent &mdash; sees everything.</p>
+             Administrator &mdash; the only role without a parent &mdash; sees everything.
+             <a href="/admin/roles">View the hierarchy</a>.</p>
            <form method="post" action="/admin/roles">${csrfInput(token)}
              <div class="row">
                <div><label>Name</label><input name="name" required></div>
@@ -414,6 +434,21 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
          <h2>Namespace access</h2>
          <section class="card">
            <p class="muted">Every role can reach <code>std</code>. Other namespaces need a grant.</p>
+           <table><thead><tr><th>Role</th><th>Namespace</th></tr></thead><tbody>
+             ${
+               namespaceAccess
+                 .map(
+                   (access) =>
+                     `<tr><td>${escapeHtml(roleName(access.securityRoleId))}</td>
+                        <td><code>${escapeHtml(
+                          namespaces.find((namespace) => namespace.id === access.namespaceId)
+                            ?.name ?? '',
+                        )}</code></td></tr>`,
+                 )
+                 .join('') ||
+               '<tr><td colspan="2" class="muted">No grants yet, and none needed for std.</td></tr>'
+             }
+           </tbody></table>
            <form method="post" action="/admin/namespace-access">${csrfInput(token)}
              <div class="row">
                <div><label>Role</label><select name="roleId" required>
@@ -499,6 +534,20 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
              }
            </tbody></table>
            <p class="muted">Build a rule on a table&rsquo;s page, then assign it to a role here.</p>
+           <table><thead><tr><th>Role</th><th>Rule</th></tr></thead><tbody>
+             ${
+               roleRules
+                 .map(
+                   (link) =>
+                     `<tr><td>${escapeHtml(roleName(link.securityRoleId))}</td>
+                        <td>${escapeHtml(
+                          rules.find((rule) => rule.id === link.securityRuleId)?.name ?? '',
+                        )}</td></tr>`,
+                 )
+                 .join('') ||
+               '<tr><td colspan="2" class="muted">No rules assigned to any role yet.</td></tr>'
+             }
+           </tbody></table>
            <form method="post" action="/admin/role-rules">${csrfInput(token)}
              <div class="row">
                <div><label>Role</label><select name="roleId" required>
@@ -508,6 +557,74 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
                  ${optionList(rules.map((rule) => ({ id: rule.id, label: rule.name })))}
                </select></div>
              </div><button>Assign rule to role</button></form>
+         </section>`,
+      ),
+    );
+  });
+
+  router.get('/admin/roles', async (request) => {
+    const context = requireUser(request);
+    app.security.assertAdministrator(context);
+
+    const [roles, users, namespaces, namespaceAccess, roleRules, rules] = await Promise.all([
+      app.metadata.listSecurityRoles(context),
+      app.metadata.listUsers(context),
+      app.metadata.listNamespaces(context),
+      app.metadata.listNamespaceAccess(context),
+      app.metadata.listRoleRules(context),
+      app.metadata.listSecurityRules(context),
+    ]);
+
+    const countBy = <T,>(items: T[], roleId: string, of: (item: T) => string): number =>
+      items.filter((item) => of(item) === roleId).length;
+
+    const renderRole = (role: SecurityRole): string => {
+      const children = roles.filter((other) => other.parentId === role.id);
+      const grants = namespaceAccess
+        .filter((access) => access.securityRoleId === role.id)
+        .map(
+          (access) =>
+            namespaces.find((namespace) => namespace.id === access.namespaceId)?.name ?? '',
+        );
+      const ruleCount = countBy(roleRules, role.id, (link) => link.securityRoleId);
+      const userCount = countBy(users, role.id, (user) => user.securityRoleId);
+
+      // Escaped one fact at a time, so the separator stays an entity rather
+      // than being escaped into visible text.
+      const facts = [
+        `${userCount} user${userCount === 1 ? '' : 's'}`,
+        role.isSystem ? 'all access' : `${ruleCount} rule${ruleCount === 1 ? '' : 's'}`,
+        ...(grants.length > 0 ? [`namespaces: ${grants.join(', ')}`] : []),
+      ]
+        .map(escapeHtml)
+        .join(' &middot; ');
+
+      return `<li>
+        <strong>${escapeHtml(role.name)}</strong>${
+          role.isSystem ? ' <span class="muted">(system)</span>' : ''
+        }
+        <span class="muted">&mdash; ${facts}</span>
+        ${children.length > 0 ? `<ul>${children.map((child) => renderRole(child)).join('')}</ul>` : ''}
+      </li>`;
+    };
+
+    // Administrator is the root; anything orphaned is listed after it so a
+    // broken parent link cannot make a role disappear from this page.
+    const roots = roles.filter(
+      (role) => role.parentId === null || !roles.some((other) => other.id === role.parentId),
+    );
+
+    return html(
+      page(
+        { title: 'Role hierarchy', context, ...messages(request) },
+        `<h1>Role hierarchy</h1>
+         <p class="lede"><a href="/admin">Back to setup</a> &middot;
+           ${rules.length} rule${rules.length === 1 ? '' : 's'} defined.</p>
+         <section class="card">
+           <p class="muted">Access flows <strong>up</strong> this tree: a role holds its own
+             rules plus every rule of every role beneath it. That is why Administrator, at the
+             root with no rules of its own, holds everything.</p>
+           <ul class="tree">${roots.map((role) => renderRole(role)).join('')}</ul>
          </section>`,
       ),
     );
@@ -682,6 +799,12 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
   router.post(
     '/admin/namespaces',
     adminAction(async (request, context) => {
+      // The form is hidden without the flag; refuse the bare POST as well.
+      if (!features.namespaceCreation) {
+        throw new AccessDeniedError(
+          'Namespace creation is disabled. Set CUMULO_ENABLE_NAMESPACE_CREATION to enable it.',
+        );
+      }
       await app.metadata.createNamespace(context, {
         name: request.body['name'] ?? '',
         label: request.body['label'] ?? '',
@@ -941,6 +1064,10 @@ function withMessage(path: string, kind: 'error' | 'notice', message: string): s
 }
 
 function messageOf(error: unknown): string {
+  // A storage constraint reaching a person means something above it failed to
+  // check first, so say something usable rather than quoting the engine.
+  if (error instanceof UniqueConstraintError) return 'That already exists.';
+  if (error instanceof DatabaseError) return 'The change could not be saved.';
   return error instanceof Error ? error.message : 'Something went wrong';
 }
 

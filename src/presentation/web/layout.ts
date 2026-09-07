@@ -46,6 +46,9 @@ button.danger { background:transparent; color:var(--danger); border-color:var(--
 .muted { color:var(--muted); }
 code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; }
 a { color:var(--accent); }
+ul.tree, ul.tree ul { list-style:none; margin:0; padding:0; }
+ul.tree ul { margin-left:10px; padding-left:14px; border-left:1px solid var(--line); }
+ul.tree li { padding:5px 0; }
 `;
 
 export interface PageOptions {

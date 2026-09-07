@@ -7,6 +7,9 @@ services:
       # Where the SQLite database lives inside the container.
       CUMULO_DATABASE_FILE: /data/cumulo.db
       PORT: "3000"
+      # Namespaces are meant to arrive with a package. Uncomment to create
+      # them by hand from the setup console while testing.
+      # CUMULO_ENABLE_NAMESPACE_CREATION: "true"
     volumes:
       # Keeps the installation across `docker compose up --build`.
       - cumulo-data:/data
