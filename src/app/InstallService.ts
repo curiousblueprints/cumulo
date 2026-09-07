@@ -4,6 +4,8 @@ import {
   AccessType,
   ADMINISTRATOR_ROLE,
   FieldAccess,
+  FieldType,
+  NAME_FIELD,
   STD_NAMESPACE,
   type Namespace,
   type SecurityRole,
@@ -39,6 +41,7 @@ export class InstallService {
   async install(): Promise<void> {
     await this.db.applySchema(PLATFORM_SCHEMA);
     await this.carryForwardFieldGrants();
+    await this.addMissingNameFields();
     await this.db.transaction(async () => {
       if (!(await this.store.getNamespaceByName(STD_NAMESPACE))) {
         const namespace: Namespace = {
@@ -95,6 +98,37 @@ export class InstallService {
       }
       await this.db.dropTable(LEGACY_SECURITY_RULE_FIELD);
     });
+  }
+
+  /**
+   * Every table has a Name field. Tables created before that was true get one
+   * now, as free text -- an auto number would have to invent values for
+   * records that already exist.
+   *
+   * A table that already has a field called `name` is left alone: it is doing
+   * the job, and renaming someone's field out from under them would be worse
+   * than not marking it as a system field.
+   */
+  private async addMissingNameFields(): Promise<void> {
+    for (const table of await this.store.listTables()) {
+      const fields = await this.store.listFields(table.id);
+      if (fields.some((field) => field.name === NAME_FIELD)) continue;
+      await this.store.transaction(async () => {
+        await this.store.insertField({
+          id: newId(),
+          namespaceId: table.namespaceId,
+          tableId: table.id,
+          name: NAME_FIELD,
+          label: 'Name',
+          type: FieldType.Text,
+          isRequired: false,
+          referenceTableId: null,
+          isSystem: true,
+          autoNumberNext: 1,
+          createdAt: nowIso(),
+        });
+      });
+    }
   }
 
   /** Ids of the rules that permit writing at all, by edit or by create. */

@@ -5,6 +5,19 @@ import { AccessType, FieldAccess, FieldType, STD_NAMESPACE, type Id } from '../s
 import type { SecurityContext } from '../src/security/context.js';
 import { ValidationError } from '../src/security/errors.js';
 
+/** The Name field every table is created with. */
+async function nameField(
+  app: Application,
+  admin: SecurityContext,
+  tableId: Id,
+): Promise<{ id: Id; name: string }> {
+  const field = (await app.security.listAllFields(admin, tableId)).find(
+    (candidate) => candidate.name === 'name',
+  );
+  assert.ok(field, 'every table is created with a Name field');
+  return field;
+}
+
 async function installed(): Promise<{ app: Application; admin: SecurityContext; std: Id }> {
   const app = await Application.start({ database: { driver: 'sqlite', file: ':memory:' } });
   const admin = await app.install.completeSetup({
@@ -22,17 +35,7 @@ async function installed(): Promise<{ app: Application; admin: SecurityContext; 
 test('a lookup field points a record at a record in another table', async () => {
   const { app, admin, std } = await installed();
   const account = await app.metadata.createTable(admin, { namespaceId: std, name: 'Account' });
-  await app.metadata.createField(admin, {
-    tableId: account.id,
-    name: 'name',
-    type: FieldType.Text,
-  });
   const contact = await app.metadata.createTable(admin, { namespaceId: std, name: 'Contact' });
-  await app.metadata.createField(admin, {
-    tableId: contact.id,
-    name: 'name',
-    type: FieldType.Text,
-  });
   const accountLookup = await app.metadata.createField(admin, {
     tableId: contact.id,
     name: 'account',
@@ -60,7 +63,6 @@ test('a lookup field points a record at a record in another table', async () => 
 test('a lookup can point at its own table, giving a hierarchy', async () => {
   const { app, admin, std } = await installed();
   const table = await app.metadata.createTable(admin, { namespaceId: std, name: 'Department' });
-  await app.metadata.createField(admin, { tableId: table.id, name: 'name', type: FieldType.Text });
   await app.metadata.createField(admin, {
     tableId: table.id,
     name: 'parent',
@@ -138,17 +140,7 @@ test('a lookup field must name a table, and only a lookup may', async () => {
 test('deleting a looked-up record clears the lookups, not the records', async () => {
   const { app, admin, std } = await installed();
   const account = await app.metadata.createTable(admin, { namespaceId: std, name: 'Account' });
-  await app.metadata.createField(admin, {
-    tableId: account.id,
-    name: 'name',
-    type: FieldType.Text,
-  });
   const contact = await app.metadata.createTable(admin, { namespaceId: std, name: 'Contact' });
-  await app.metadata.createField(admin, {
-    tableId: contact.id,
-    name: 'name',
-    type: FieldType.Text,
-  });
   await app.metadata.createField(admin, {
     tableId: contact.id,
     name: 'account',
@@ -175,7 +167,6 @@ test('deleting a looked-up record clears the lookups, not the records', async ()
 test('deleting a record in a hierarchy detaches its children', async () => {
   const { app, admin, std } = await installed();
   const table = await app.metadata.createTable(admin, { namespaceId: std, name: 'Department' });
-  await app.metadata.createField(admin, { tableId: table.id, name: 'name', type: FieldType.Text });
   await app.metadata.createField(admin, {
     tableId: table.id,
     name: 'parent',
@@ -199,17 +190,9 @@ test('deleting a record in a hierarchy detaches its children', async () => {
 test('a lookup can only be set to a record the user is allowed to see', async () => {
   const { app, admin, std } = await installed();
   const account = await app.metadata.createTable(admin, { namespaceId: std, name: 'Account' });
-  const accountName = await app.metadata.createField(admin, {
-    tableId: account.id,
-    name: 'name',
-    type: FieldType.Text,
-  });
+  const accountName = await nameField(app, admin, account.id);
   const contact = await app.metadata.createTable(admin, { namespaceId: std, name: 'Contact' });
-  const contactName = await app.metadata.createField(admin, {
-    tableId: contact.id,
-    name: 'name',
-    type: FieldType.Text,
-  });
+  const contactName = await nameField(app, admin, contact.id);
   const lookup = await app.metadata.createField(admin, {
     tableId: contact.id,
     name: 'account',

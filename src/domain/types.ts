@@ -67,7 +67,70 @@ export enum FieldType {
   DateTime = 'datetime',
   /** A lookup to a record in another table; `referenceTableId` is required. */
   Reference = 'reference',
+  /** Assigned by the platform on create, sequential within the field. */
+  AutoNumber = 'autoNumber',
+  /** A four-digit year. */
+  Year = 'year',
+  /** A month of the year, stored 1-12. */
+  Month = 'month',
+  /**
+   * A day of the month, stored 1-31. Not validated against a month: a day
+   * standing on its own has no month to be too large for.
+   */
+  Day = 'day',
+  /** A day of the week, stored 1-7 with Sunday as 1. */
+  DayOfWeek = 'dayOfWeek',
 }
+
+/** Types compared as numbers rather than as text. */
+export const NUMERIC_FIELD_TYPES: readonly FieldType[] = [
+  FieldType.Number,
+  FieldType.AutoNumber,
+  FieldType.Year,
+  FieldType.Month,
+  FieldType.Day,
+  FieldType.DayOfWeek,
+];
+
+/** Types the platform fills in, which no one may set or edit. */
+export const SYSTEM_ASSIGNED_FIELD_TYPES: readonly FieldType[] = [FieldType.AutoNumber];
+
+/** Months, by their stored value. */
+export const MONTHS: readonly { value: number; label: string }[] = [
+  { value: 1, label: 'January' },
+  { value: 2, label: 'February' },
+  { value: 3, label: 'March' },
+  { value: 4, label: 'April' },
+  { value: 5, label: 'May' },
+  { value: 6, label: 'June' },
+  { value: 7, label: 'July' },
+  { value: 8, label: 'August' },
+  { value: 9, label: 'September' },
+  { value: 10, label: 'October' },
+  { value: 11, label: 'November' },
+  { value: 12, label: 'December' },
+];
+
+/** Days of the week, by their stored value. The week starts on Sunday. */
+export const DAYS_OF_WEEK: readonly { value: number; label: string }[] = [
+  { value: 1, label: 'Sunday' },
+  { value: 2, label: 'Monday' },
+  { value: 3, label: 'Tuesday' },
+  { value: 4, label: 'Wednesday' },
+  { value: 5, label: 'Thursday' },
+  { value: 6, label: 'Friday' },
+  { value: 7, label: 'Saturday' },
+];
+
+/**
+ * The API name of the field every table is created with. It is a system field:
+ * it cannot be deleted, so anything referring to a record by name can count on
+ * it being there.
+ */
+export const NAME_FIELD = 'name';
+
+/** What a table's Name field may be. */
+export type NameFieldType = FieldType.Text | FieldType.AutoNumber;
 
 /** Comparison operators available to a security rule clause. */
 export enum ClauseOperator {
@@ -148,6 +211,10 @@ export interface FieldDef {
   isRequired: boolean;
   /** Set only when `type` is Reference: the table this field points at. */
   referenceTableId: Id | null;
+  /** True for fields the platform created and will not let you delete. */
+  isSystem: boolean;
+  /** Only meaningful for AutoNumber: the value the next record will take. */
+  autoNumberNext: number;
   createdAt: string;
 }
 

@@ -22,7 +22,7 @@ import {
   rulesGrantingCreate,
   type PermissionSet,
 } from './PermissionResolver.js';
-import { fromStoredValue, toStoredValue } from './values.js';
+import { fromStoredValue, isSystemAssigned, toStoredValue } from './values.js';
 
 export interface QueryOptions {
   limit?: number;
@@ -218,6 +218,7 @@ export class SecurityLayer {
 
     const stored = this.normalizeInput(input, byName);
     for (const field of fields.values()) {
+      if (isSystemAssigned(field)) continue;
       if (field.isRequired && (stored.get(field.id) ?? null) === null) {
         throw new ValidationError(`Field "${field.name}" is required`);
       }
@@ -252,6 +253,12 @@ export class SecurityLayer {
 
     await this.store.transaction(async () => {
       await this.store.insertRecord(record);
+      // Auto numbers are handed out here, inside the same transaction, so the
+      // number and the record it belongs to commit together.
+      for (const field of fields.values()) {
+        if (field.type !== FieldType.AutoNumber) continue;
+        stored.set(field.id, String(await this.store.takeNextAutoNumber(field.id)));
+      }
       for (const [fieldId, value] of stored) {
         if (value === null) continue;
         await this.store.upsertValue({ id: newId(), recordId: record.id, fieldId, value });
@@ -375,7 +382,11 @@ export class SecurityLayer {
     select: (permissions: PermissionSet) => CompiledRule[],
   ): Promise<FieldDef[]> {
     const permissions = await this.permissions(context);
-    const fields = await this.store.listFields(tableId);
+    // A field the platform fills in is writable by nobody, administrator
+    // included, so it never appears in a list of what may be written.
+    const fields = (await this.store.listFields(tableId)).filter(
+      (field) => !isSystemAssigned(field),
+    );
     if (permissions.isAdministrator) return fields;
     const granted = grantedFieldIds(select(permissions), FieldAccess.Edit);
     return fields.filter((field) => granted.has(field.id));

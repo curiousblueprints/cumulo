@@ -135,6 +135,9 @@ export const PLATFORM_SCHEMA: Schema = [
         nullable: true,
         references: { table: T.table, column: 'id' },
       },
+      { name: 'isSystem', type: 'boolean' },
+      /** The next value an AutoNumber field will hand out. */
+      { name: 'autoNumberNext', type: 'integer' },
       createdAt,
     ],
     uniqueConstraints: [['tableId', 'namespaceId', 'name']],

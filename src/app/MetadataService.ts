@@ -6,6 +6,9 @@ import {
   ClauseOperator,
   FieldAccess,
   FieldType,
+  NAME_FIELD,
+  SYSTEM_ASSIGNED_FIELD_TYPES,
+  type NameFieldType,
   UNARY_OPERATORS,
   type FieldDef,
   type Id,
@@ -55,6 +58,16 @@ export interface SecurityRuleInput {
   clauses?: ClauseInput[];
   /** Fields the rule exposes when it applies, each with its own access. */
   fieldGrants?: FieldGrantInput[];
+}
+
+/**
+ * The outcome of a grant that is safe to repeat: `created` is false when the
+ * grant was already there, so the caller can say so rather than claiming to
+ * have done something.
+ */
+export interface GrantResult<T> {
+  record: T;
+  created: boolean;
 }
 
 /** A rule plus what it exposes, for display. */
@@ -160,7 +173,7 @@ export class MetadataService {
     context: SecurityContext,
     roleId: Id,
     namespaceId: Id,
-  ): Promise<NamespaceAccess> {
+  ): Promise<GrantResult<NamespaceAccess>> {
     return this.security.asAdministrator(context, async (store) => {
       const role = await store.getSecurityRole(roleId);
       if (!role) throw new ValidationError('Role does not exist');
@@ -172,11 +185,12 @@ export class MetadataService {
       const namespace = await store.getNamespace(namespaceId);
       if (!namespace) throw new ValidationError('Namespace does not exist');
 
-      // Granting twice is not an error: the end state is what was asked for.
+      // Granting twice is not an error -- the end state is what was asked for
+      // -- but it is not the same event, and the caller is told which it was.
       const existing = (await store.listNamespaceAccessForRoles([role.id])).find(
         (access) => access.namespaceId === namespace.id,
       );
-      if (existing) return existing;
+      if (existing) return { record: existing, created: false };
 
       const access: NamespaceAccess = {
         id: newId(),
@@ -184,7 +198,7 @@ export class MetadataService {
         namespaceId: namespace.id,
         createdAt: nowIso(),
       };
-      return store.insertNamespaceAccess(access);
+      return { record: await store.insertNamespaceAccess(access), created: true };
     });
   }
 
@@ -231,9 +245,22 @@ export class MetadataService {
 
   // --- tables and fields -------------------------------------------------
 
+  /**
+   * Create a table, along with the Name field every table has.
+   *
+   * Name is either free text or an auto number, and it is a system field:
+   * it cannot be deleted, so anything that refers to a record by name can
+   * count on it existing.
+   */
   async createTable(
     context: SecurityContext,
-    input: { namespaceId: Id; name: string; label?: string },
+    input: {
+      namespaceId: Id;
+      name: string;
+      label?: string;
+      nameFieldType?: NameFieldType;
+      nameFieldLabel?: string;
+    },
   ): Promise<TableDef> {
     return this.security.asAdministrator(context, async (store) => {
       const name = input.name.trim();
@@ -243,6 +270,12 @@ export class MetadataService {
       if (await store.getTableByName(namespace.id, name)) {
         throw new ValidationError(`Table "${name}" already exists in ${namespace.name}`);
       }
+
+      const nameFieldType = input.nameFieldType ?? FieldType.Text;
+      if (nameFieldType !== FieldType.Text && nameFieldType !== FieldType.AutoNumber) {
+        throw new ValidationError('The Name field must be free text or an auto number');
+      }
+
       const table: TableDef = {
         id: newId(),
         namespaceId: namespace.id,
@@ -250,7 +283,11 @@ export class MetadataService {
         label: input.label?.trim() || name,
         createdAt: nowIso(),
       };
-      return store.insertTable(table);
+      await store.insertTable(table);
+      await store.insertField(
+        buildNameField(table, input.nameFieldLabel?.trim() || 'Name', nameFieldType),
+      );
+      return table;
     });
   }
 
@@ -316,11 +353,49 @@ export class MetadataService {
         name,
         label: input.label?.trim() || name,
         type: input.type,
-        isRequired: input.isRequired ?? false,
+        // An auto number is filled in by the platform, so "required" would
+        // describe the caller's duty rather than the field's.
+        isRequired: input.type === FieldType.AutoNumber ? false : (input.isRequired ?? false),
         referenceTableId,
+        isSystem: false,
+        autoNumberNext: 1,
         createdAt: nowIso(),
       };
       return store.insertField(field);
+    });
+  }
+
+  /**
+   * Remove a field, its values and its field grants.
+   *
+   * Two things are refused. A system field -- the Name every table is created
+   * with -- stays, because things depend on its being there. And a field a
+   * security rule clause reads stays until that rule is dealt with: dropping
+   * the clause underneath a rule would silently widen what the rule matches,
+   * which is the last thing a deletion should do quietly.
+   */
+  async deleteField(context: SecurityContext, fieldId: Id): Promise<void> {
+    await this.security.asAdministrator(context, async (store) => {
+      const field = await store.getField(fieldId);
+      if (!field) throw new ValidationError('Field does not exist');
+      if (field.isSystem) {
+        throw new ValidationError(`"${field.label}" is a system field and cannot be deleted`);
+      }
+
+      const clauses = await store.listClausesUsingField(field.id);
+      if (clauses.length > 0) {
+        const rules = await store.listSecurityRulesByIds([
+          ...new Set(clauses.map((clause) => clause.securityRuleId)),
+        ]);
+        const names = rules.map((rule) => `"${rule.name}"`).join(', ');
+        throw new ValidationError(
+          `"${field.label}" is used by security rule ${names}. Remove the rule first, ` +
+            'so that deleting the field cannot quietly change what the rule matches.',
+        );
+      }
+
+      // Values and field grants go with it, by the schema's cascades.
+      await store.deleteField(field.id);
     });
   }
 
@@ -401,6 +476,12 @@ export class MetadataService {
             'A field can only be granted as editable by a rule that grants edit or create',
           );
         }
+        const target = tableFields.find((field) => field.id === grant.fieldId);
+        if (access === FieldAccess.Edit && target && SYSTEM_ASSIGNED_FIELD_TYPES.includes(target.type)) {
+          throw new ValidationError(
+            `"${target.label}" is filled in by the platform, so it can only be granted as read-only`,
+          );
+        }
         // The widest grant wins if a field is named twice.
         if (grants.get(grant.fieldId) !== FieldAccess.Edit) grants.set(grant.fieldId, access);
       }
@@ -452,7 +533,7 @@ export class MetadataService {
     context: SecurityContext,
     roleId: Id,
     ruleId: Id,
-  ): Promise<SecurityRoleRule> {
+  ): Promise<GrantResult<SecurityRoleRule>> {
     return this.security.asAdministrator(context, async (store) => {
       const role = await store.getSecurityRole(roleId);
       if (!role) throw new ValidationError('Role does not exist');
@@ -468,7 +549,7 @@ export class MetadataService {
       const existing = (await store.listSecurityRoleRulesForRoles([role.id])).find(
         (link) => link.securityRuleId === rule.id,
       );
-      if (existing) return existing;
+      if (existing) return { record: existing, created: false };
 
       const link: SecurityRoleRule = {
         id: newId(),
@@ -476,7 +557,7 @@ export class MetadataService {
         securityRuleId: rule.id,
         createdAt: nowIso(),
       };
-      return store.insertSecurityRoleRule(link);
+      return { record: await store.insertSecurityRoleRule(link), created: true };
     });
   }
 
@@ -549,6 +630,22 @@ export class MetadataService {
       store.listSecurityRules(),
     );
   }
+}
+
+function buildNameField(table: TableDef, label: string, type: NameFieldType): FieldDef {
+  return {
+    id: newId(),
+    namespaceId: table.namespaceId,
+    tableId: table.id,
+    name: NAME_FIELD,
+    label,
+    type,
+    isRequired: false,
+    referenceTableId: null,
+    isSystem: true,
+    autoNumberNext: 1,
+    createdAt: nowIso(),
+  };
 }
 
 function assertApiName(name: string, label: string): void {

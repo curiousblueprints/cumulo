@@ -320,11 +320,6 @@ test('a lookup field renders as a picker of records the user can see', async () 
     namespaceId: std.id,
     name: 'Account',
   });
-  await app.metadata.createField(admin, {
-    tableId: account.id,
-    name: 'name',
-    type: 'text' as never,
-  });
   const contact = await app.metadata.createTable(admin, {
     namespaceId: std.id,
     name: 'Contact',

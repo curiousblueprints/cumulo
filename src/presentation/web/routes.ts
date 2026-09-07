@@ -5,8 +5,11 @@ import {
   AccessType,
   ClauseMatch,
   ClauseOperator,
+  DAYS_OF_WEEK,
   FieldAccess,
   FieldType,
+  MONTHS,
+  NAME_FIELD,
   type FieldDef,
   type RecordView,
   type SecurityRole,
@@ -17,6 +20,7 @@ import type { Router } from '../http/router.js';
 import { clearedCookie, sessionCookie, type SessionStore } from '../http/sessions.js';
 import { RedirectSignal } from '../http/signals.js';
 import { html, redirect, type HttpRequest, type HttpResponse } from '../http/types.js';
+import { labelForValue } from '../../security/values.js';
 import { csrfInput, escapeHtml, optionList, page } from './layout.js';
 
 /**
@@ -512,7 +516,14 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
                <div><label>Namespace</label><select name="namespaceId" required>
                  ${optionList(namespaces.map((namespace) => ({ id: namespace.id, label: namespace.name })))}
                </select></div>
-             </div><button>Add table</button></form>
+               <div><label>Name field</label><select name="nameFieldType">
+                 <option value="${FieldType.Text}">Free text</option>
+                 <option value="${FieldType.AutoNumber}">Auto number</option>
+               </select></div>
+             </div>
+             <p class="muted">Every table gets a Name field, which is how a record is
+               referred to elsewhere. It cannot be deleted.</p>
+             <button>Add table</button></form>
          </section>
 
          <h2>Security rules</h2>
@@ -650,18 +661,32 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
 
          <h2>Fields</h2>
          <section class="card">
-           <table><thead><tr><th>Name</th><th>Label</th><th>Type</th><th>Required</th></tr></thead><tbody>
+           <table><thead><tr><th>Name</th><th>Label</th><th>Type</th><th>Required</th>
+             <th></th></tr></thead><tbody>
              ${
                fields
                  .map(
                    (field) =>
                      `<tr><td><code>${escapeHtml(field.name)}</code></td><td>${escapeHtml(
                        field.label,
-                     )}</td><td class="muted">${escapeHtml(field.type)}</td><td class="muted">${
-                       field.isRequired ? 'yes' : 'no'
+                     )}</td><td class="muted">${escapeHtml(fieldTypeLabel(field.type))}${
+                       field.referenceTableId
+                         ? ` &rarr; ${escapeHtml(
+                             tables.find((other) => other.id === field.referenceTableId)?.label ??
+                               '',
+                           )}`
+                         : ''
+                     }</td><td class="muted">${field.isRequired ? 'yes' : 'no'}</td>
+                     <td>${
+                       field.isSystem
+                         ? '<span class="muted">system</span>'
+                         : `<form method="post" action="/admin/fields/${escapeHtml(
+                             field.id,
+                           )}/delete" class="inline">${csrfInput(token)}
+                              <button class="danger" style="margin:0">Delete</button></form>`
                      }</td></tr>`,
                  )
-                 .join('') || '<tr><td colspan="4" class="muted">No fields yet.</td></tr>'
+                 .join('') || '<tr><td colspan="5" class="muted">No fields yet.</td></tr>'
              }
            </tbody></table>
            <form method="post" action="/admin/fields">${csrfInput(token)}
@@ -670,7 +695,11 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
                <div><label>API name</label><input name="name" required></div>
                <div><label>Label</label><input name="label"></div>
                <div><label>Type</label><select name="type">
-                 ${optionList(Object.values(FieldType).map((type) => ({ id: type, label: type })))}
+                 ${optionList(
+                   Object.values(FieldType)
+                     .filter((type) => type !== FieldType.AutoNumber)
+                     .map((type) => ({ id: type, label: fieldTypeLabel(type) })),
+                 )}
                </select></div>
              </div>
              <div class="row">
@@ -827,12 +856,14 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
   router.post(
     '/admin/namespace-access',
     adminAction(async (request, context) => {
-      await app.metadata.grantNamespaceAccess(
+      const result = await app.metadata.grantNamespaceAccess(
         context,
         request.body['roleId'] ?? '',
         request.body['namespaceId'] ?? '',
       );
-      return 'Namespace access granted';
+      return result.created
+        ? 'Namespace access granted'
+        : 'That role already had access to that namespace';
     }),
   );
 
@@ -856,6 +887,10 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
         namespaceId: request.body['namespaceId'] ?? '',
         name: request.body['name'] ?? '',
         label: request.body['label'] ?? '',
+        nameFieldType:
+          request.body['nameFieldType'] === FieldType.AutoNumber
+            ? FieldType.AutoNumber
+            : FieldType.Text,
       });
       throw new RedirectSignal(
         withMessage(`/admin/tables/${table.id}`, 'notice', 'Table created; now add fields'),
@@ -876,6 +911,14 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
         referenceTableId: request.body['referenceTableId'] || null,
       });
       return 'Field created';
+    }),
+  );
+
+  router.post(
+    '/admin/fields/:fieldId/delete',
+    adminAction(async (request, context) => {
+      await app.metadata.deleteField(context, request.params['fieldId'] ?? '');
+      return 'Field deleted';
     }),
   );
 
@@ -915,12 +958,14 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
   router.post(
     '/admin/role-rules',
     adminAction(async (request, context) => {
-      await app.metadata.assignRuleToRole(
+      const result = await app.metadata.assignRuleToRole(
         context,
         request.body['roleId'] ?? '',
         request.body['ruleId'] ?? '',
       );
-      return 'Rule assigned to role';
+      return result.created
+        ? 'Rule assigned to role'
+        : 'That rule was already assigned to that role';
     }),
   );
 }
@@ -961,13 +1006,15 @@ async function lookupOptions(
   return options;
 }
 
-/** A record's stand-in name: its first non-empty readable text-ish value. */
+/** How a record reads in a picker: its Name, or the first thing that will do. */
 function recordLabel(record: RecordView, fields: FieldDef[]): string {
-  for (const field of fields) {
+  const named = fields.find((field) => field.name === NAME_FIELD);
+  const ordered = named ? [named, ...fields.filter((field) => field !== named)] : fields;
+  for (const field of ordered) {
     if (field.type === FieldType.Reference) continue;
     const value = record.values[field.name];
     if (value !== null && value !== undefined && String(value).length > 0) {
-      return `${String(value)} (${record.id.slice(0, 8)})`;
+      return `${labelForValue(field, value)} (${record.id.slice(0, 8)})`;
     }
   }
   return record.id;
@@ -984,14 +1031,58 @@ function valuesFrom(request: HttpRequest, fields: FieldDef[]): Record<string, un
   return values;
 }
 
+/** Human wording for a field type, since the API names are terse. */
+function fieldTypeLabel(type: FieldType): string {
+  switch (type) {
+    case FieldType.DateTime:
+      return 'date and time';
+    case FieldType.Reference:
+      return 'lookup';
+    case FieldType.AutoNumber:
+      return 'auto number';
+    case FieldType.DayOfWeek:
+      return 'day of week';
+    default:
+      return type;
+  }
+}
+
 function fieldInput(field: FieldDef, current: unknown, lookups: LookupOptions): string {
   const name = `field_${field.name}`;
   const label = `<label for="${escapeHtml(name)}">${escapeHtml(field.label)}${
     field.isRequired ? ' *' : ''
   }</label>`;
   const value = escapeHtml(display(current));
+  const currentNumber = current === null || current === undefined ? '' : String(current);
+
+  /** A picker over a fixed list, which is what months and weekdays are. */
+  const choose = (choices: readonly { value: number; label: string }[]): string =>
+    `${label}<select id="${escapeHtml(name)}" name="${escapeHtml(name)}"${
+      field.isRequired ? ' required' : ''
+    }>
+      <option value=""${currentNumber ? '' : ' selected'}>&mdash; none &mdash;</option>
+      ${optionList(
+        choices.map((choice) => ({ id: String(choice.value), label: choice.label })),
+        currentNumber,
+      )}</select>`;
 
   switch (field.type) {
+    case FieldType.Month:
+      return choose(MONTHS);
+    case FieldType.DayOfWeek:
+      return choose(DAYS_OF_WEEK);
+    case FieldType.Year:
+      return `${label}<input id="${escapeHtml(name)}" name="${escapeHtml(
+        name,
+      )}" type="number" min="1000" max="9999" step="1" inputmode="numeric" value="${value}"${
+        field.isRequired ? ' required' : ''
+      }>`;
+    case FieldType.Day:
+      return `${label}<input id="${escapeHtml(name)}" name="${escapeHtml(
+        name,
+      )}" type="number" min="1" max="31" step="1" value="${value}"${
+        field.isRequired ? ' required' : ''
+      }>`;
     case FieldType.Reference: {
       const targets = lookups.get(field.id) ?? [];
       const currentId = current === null || current === undefined ? '' : String(current);
@@ -1030,13 +1121,13 @@ function fieldInput(field: FieldDef, current: unknown, lookups: LookupOptions): 
   }
 }
 
-/** A table cell: lookups link through to the record they point at. */
+/** A table cell: lookups link through, and coded values read as their names. */
 function cell(field: FieldDef, value: unknown): string {
   if (field.type === FieldType.Reference && value) {
     const id = String(value);
     return `<a href="/records/${escapeHtml(id)}"><code>${escapeHtml(id.slice(0, 8))}</code></a>`;
   }
-  return escapeHtml(display(value));
+  return escapeHtml(labelForValue(field, value));
 }
 
 function display(value: unknown): string {

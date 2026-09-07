@@ -997,7 +997,11 @@ test('granting access or assigning a rule twice leaves one row, not an error', a
 
   const first = await app.metadata.grantNamespaceAccess(admin, role.id, std.id);
   const second = await app.metadata.grantNamespaceAccess(admin, role.id, std.id);
-  assert.equal(first.id, second.id);
+  assert.equal(first.created, true);
+  // The second call reports that it changed nothing, so the console can say so
+  // instead of claiming a grant it did not make.
+  assert.equal(second.created, false);
+  assert.equal(first.record.id, second.record.id);
   assert.equal((await app.metadata.listNamespaceAccess(admin)).length, 1);
 
   const rule = await app.metadata.createSecurityRule(admin, {
@@ -1007,7 +1011,9 @@ test('granting access or assigning a rule twice leaves one row, not an error', a
   });
   const linkA = await app.metadata.assignRuleToRole(admin, role.id, rule.id);
   const linkB = await app.metadata.assignRuleToRole(admin, role.id, rule.id);
-  assert.equal(linkA.id, linkB.id);
+  assert.equal(linkA.created, true);
+  assert.equal(linkB.created, false);
+  assert.equal(linkA.record.id, linkB.record.id);
   assert.equal((await app.metadata.listRoleRules(admin)).length, 1);
   await app.stop();
 });

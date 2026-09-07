@@ -55,8 +55,8 @@ user created there is locked to the Administrator role -- an installation
 whose only user could not administer it would be stranded.
 
 From `/setup` (the console, once signed in) an administrator can add roles,
-users, tables, fields and security rules, and `/admin/roles` shows the role
-hierarchy as a tree. `/tables` is the data side: the tables the signed-in role
+users, tables, fields and security rules, delete fields, and see the role
+hierarchy as a tree at `/admin/roles`. `/tables` is the data side: the tables the signed-in role
 can reach, and the records within them that its rules allow.
 
 Namespaces are not created here. They are meant to arrive with a package, so
@@ -158,18 +158,54 @@ Clause target values understand `$user.id`, `$user.username` and
 `$user.securityRoleId`, which is how you write "records this user owns"
 without hard-coding anyone.
 
-## Tables have no standard fields
+## Fields
 
-A new table has no fields at all -- there is no hidden `Name`, `Owner` or
-`CreatedBy`. What every record carries is the three columns on the `record` row
-itself: `id`, `createdAt` and `updatedAt`. Those are always returned and always
-visible, but they are not `field` rows, so they cannot be granted, and a
-security rule clause cannot refer to them.
+A table is created with exactly one field, **Name**, which is how a record is
+referred to elsewhere -- it is what a lookup picker shows. It is either free
+text or an **auto number**, chosen when the table is created, and it is a
+system field: it cannot be deleted, so anything counting on a record having a
+name can go on doing so.
 
-The practical consequence is that ownership is something you build: a rule
-saying "records this user owns" needs a field on the table holding the user id,
-which an administrator creates like any other, and a clause comparing it to
-`$user.id`.
+There is still no `Owner` or `CreatedBy`. Beyond Name, every record carries the
+three columns on the `record` row itself -- `id`, `createdAt` and `updatedAt`.
+Those are always returned and always visible, but they are not `field` rows, so
+they cannot be granted and a rule clause cannot refer to them. Ownership is
+therefore something you build: a field holding a user id, and a clause
+comparing it to `$user.id`.
+
+### Field types
+
+| Type | Holds | Notes |
+| --- | --- | --- |
+| `text` | Free text | |
+| `number` | Any number | |
+| `boolean` | Yes or no | |
+| `date` | `YYYY-MM-DD` | |
+| `datetime` | An instant, stored ISO-8601 | |
+| `reference` | A lookup to a record | See below |
+| `autoNumber` | A sequential number | Assigned on create; nobody may set or edit one |
+| `year` | A four-digit year | Digits only |
+| `month` | A month, stored 1-12 | Chosen from the twelve months |
+| `day` | A day of the month, stored 1-31 | Not checked against a month: a day on its own has no month to be too large for |
+| `dayOfWeek` | A weekday, stored 1-7 | Sunday is 1 |
+
+`month` and `dayOfWeek` are stored as numbers and shown as names. They compare
+as numbers too, so "on or after October" means what it should -- as text, `2`
+would sort after `10` and February would slip in.
+
+An auto number is handed out inside the transaction that writes the record, so
+the number and the record commit together. Each field counts on its own. It can
+be granted read-only but never editable, since nobody can write one.
+
+### Deleting a field
+
+Fields can be deleted from a table's page in the console, which also removes
+their values and their field grants. Two are refused:
+
+- The **Name** field, which is a system field.
+- A field a **security rule clause reads**. Dropping a clause from underneath a
+  rule would silently widen what that rule matches, so the rule has to be dealt
+  with first. The error names the rule.
 
 ## Lookups
 
@@ -197,7 +233,7 @@ and none of them owns anything.
 npm test
 ```
 
-64 tests over the adapter, the clause-logic parser, the security layer
+75 tests over the adapter, the clause-logic parser, the security layer
 (hierarchy inheritance, record filtering, per-field grants and the ceiling over
 them, namespace gating, metadata protection), lookups, the rename migration,
 and the HTTP surface end to end.

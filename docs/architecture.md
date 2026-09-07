@@ -250,22 +250,62 @@ This is the pattern to copy rather than the mechanism to reuse. A third or
 fourth of these wants a real migrations directory and a schema-version row,
 not more one-off methods on `InstallService`.
 
-## Standard fields, and the lack of them
+## The Name field, and what is still missing
 
-A table is created empty. `record` carries `id`, `createdAt` and `updatedAt` as
-real columns, and `project()` always includes them, but they are not `field`
-rows: they have no `securityRuleFieldGrant`, and `SecurityRuleClause.fieldId`
-cannot point at them.
+`createTable` seeds one `field` row: `name`, marked `isSystem`, either text or
+an auto number. Being a real field rather than a special case means it is
+granted, filtered and compared like any other -- the only thing special about
+it is that `deleteField` refuses to remove it.
 
-Adding a standard set (`name`, `ownerId`, `createdById`, `lastModifiedById`)
-would mean seeding `field` rows whenever a table is created, and deciding who
-may see and change them -- ownership in particular is a security question, not
-just a column. Until that is decided, ownership is modelled by hand: a field
-holding a user id, and a clause comparing it to `$user.id`.
+`record` still carries `id`, `createdAt` and `updatedAt` as columns that
+`project()` always includes. Those are not `field` rows: they have no grant and
+`SecurityRuleClause.fieldId` cannot point at them.
+
+There is deliberately no `ownerId`, `createdById` or `lastModifiedById`. Adding
+them is not just more seeding -- ownership decides who sees what, so it is a
+security question, and audit fields need a notion of "written by the platform,
+never by a caller" that only auto numbers have so far. Until that is decided,
+ownership is modelled by hand: a field holding a user id, and a clause
+comparing it to `$user.id`.
+
+### System-assigned values
+
+`SYSTEM_ASSIGNED_FIELD_TYPES` is the list of types the platform fills in;
+`autoNumber` is the only member today. Three things follow from membership, and
+adding audit fields later would reuse all three:
+
+- `toStoredValue` refuses any incoming value, so a caller cannot set one.
+- `grantedFields` filters them out of what may be written, administrator
+  included -- there is no role that can edit one.
+- Rule authoring refuses to grant one as editable, since nothing could act on
+  it.
+
+`takeNextAutoNumber` reads the counter off the `field` row and writes it back
+incremented, inside the transaction that inserts the record. Two processes
+writing the same table would need that read-and-increment to be atomic in the
+database rather than in the adapter; today's single process does not.
+
+## Deleting a field
+
+`deleteField` leans on the schema's cascades for `value` and
+`securityRuleFieldGrant`: losing a value or a grant only ever narrows what is
+visible, so cascading is safe.
+
+`securityRuleClause` also cascades, and that is exactly why deletion refuses to
+proceed when a clause reads the field. Consider a rule matching `all` of two
+clauses. Drop one and the rule now matches on the strength of the other alone,
+so a deletion aimed at a column would quietly widen who can see records. The
+same reasoning covers custom clause logic, which would be left referring to a
+sequence number that no longer exists.
+
+So the rule has to be dealt with first, and the error names it. The alternative
+-- deleting the rule along with the field -- trades a loud failure for a silent
+change to the security model, which is the wrong way round.
 
 ## What is deliberately not built
 
-- Standard fields on new tables, and with them an ownership model
+- Ownership and audit fields (`ownerId`, `createdById`, `lastModifiedById`)
+- Editing a field: changing its type, label or whether it is required
 - Editing and deleting metadata (only creation and a few guarded deletes exist)
 - A query language over records; listing is table-scoped with a limit
 - Packaging/installing a namespace as a unit

@@ -3,6 +3,7 @@ import {
   ClauseOperator,
   FieldAccess,
   FieldType,
+  NUMERIC_FIELD_TYPES,
   UNARY_OPERATORS,
   type FieldDef,
   type Id,
@@ -44,6 +45,10 @@ function compareNumbers(
   return compare(a, b);
 }
 
+function isNumeric(type: FieldType): boolean {
+  return NUMERIC_FIELD_TYPES.includes(type);
+}
+
 function ordered(
   type: FieldType,
   left: string,
@@ -51,13 +56,15 @@ function ordered(
   numeric: (a: number, b: number) => boolean,
   textual: (a: string, b: string) => boolean,
 ): boolean {
-  if (type === FieldType.Number) return compareNumbers(left, right, numeric);
+  // Months and weekdays are stored as numbers so that "before June" means what
+  // it should; comparing them as text would put 10 before 2.
+  if (isNumeric(type)) return compareNumbers(left, right, numeric);
   // ISO-8601 dates and datetimes sort correctly as text.
   return textual(left, right);
 }
 
 function equals(type: FieldType, left: string, right: string): boolean {
-  if (type === FieldType.Number) return compareNumbers(left, right, (a, b) => a === b);
+  if (isNumeric(type)) return compareNumbers(left, right, (a, b) => a === b);
   if (type === FieldType.Boolean) return normalizeBoolean(left) === normalizeBoolean(right);
   return left === right;
 }

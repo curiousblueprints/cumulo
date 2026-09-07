@@ -59,6 +59,8 @@ test('an empty value is simply not equal to anything else', async () => {
     type: FieldType.Text,
     isRequired: false,
     referenceTableId: null,
+    isSystem: false,
+    autoNumberNext: 1,
     createdAt: '',
   };
   const user = {
@@ -118,6 +120,8 @@ test('two empty values are equal to each other', async () => {
     type: FieldType.Text,
     isRequired: false,
     referenceTableId: null,
+    isSystem: false,
+    autoNumberNext: 1,
     createdAt: '',
   };
   const other = { ...field, id: 'b', name: 'b', label: 'B' };

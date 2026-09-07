@@ -246,6 +246,35 @@ export class MetadataStore {
     return this.db.delete(T.field, id);
   }
 
+  /**
+   * Hand out an AutoNumber field's next value and advance the counter.
+   * Callers run this inside the transaction that writes the record, so the
+   * number and the record it belongs to are committed together.
+   */
+  async takeNextAutoNumber(fieldId: Id): Promise<number> {
+    const row = await this.db.findById(T.field, fieldId);
+    if (!row) throw new Error(`No such field: ${fieldId}`);
+    const next = Number(row['autoNumberNext'] ?? 1) || 1;
+    await this.db.update(T.field, fieldId, { autoNumberNext: next + 1 });
+    return next;
+  }
+
+  /** Clauses that read this field, either side of the comparison. */
+  async listClausesUsingField(fieldId: Id): Promise<SecurityRuleClause[]> {
+    const [asSubject, asComparison] = await Promise.all([
+      this.db.find(T.securityRuleClause, {
+        where: [{ column: 'fieldId', operator: 'eq', value: fieldId }],
+      }),
+      this.db.find(T.securityRuleClause, {
+        where: [{ column: 'compareFieldId', operator: 'eq', value: fieldId }],
+      }),
+    ]);
+    const byId = new Map(
+      [...asSubject, ...asComparison].map((row) => [String(row['id']), toClause(row)]),
+    );
+    return [...byId.values()];
+  }
+
   // --- securityRule and friends -----------------------------------------
 
   async insertSecurityRule(rule: SecurityRule): Promise<SecurityRule> {
@@ -460,6 +489,8 @@ function toField(row: Row): FieldDef {
     type: str(row, 'type') as FieldType,
     isRequired: bool(row, 'isRequired'),
     referenceTableId: nullableStr(row, 'referenceTableId'),
+    isSystem: bool(row, 'isSystem'),
+    autoNumberNext: Number(row['autoNumberNext'] ?? 1) || 1,
     createdAt: str(row, 'createdAt'),
   };
 }
