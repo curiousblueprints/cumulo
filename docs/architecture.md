@@ -45,8 +45,8 @@ other call requires.
 3. **Namespaces** -- `std` plus every `namespaceAccess` row for any role in the
    closure.
 4. **Rules** -- every `securityRule` linked to any role in the closure, each
-   compiled with its clauses, its `canCreate` flag and its granted field ids,
-   indexed by table.
+   compiled with its clauses, its `canCreate` flag and its field grants as a
+   `Map<fieldId, FieldAccess>`, indexed by table.
 
 The result is cached per role and dropped wholesale whenever metadata changes,
 since permissions are derived from metadata. `SecurityLayer.asAdministrator`
@@ -124,12 +124,45 @@ offers records the user can read. A lookup whose current target the user cannot
 read is kept as a selected option on the edit form, so saving does not silently
 clear it.
 
+## Field grants
+
+`securityRuleFieldGrant` is a row per (rule, field) with an `access` of `read`
+or `edit`. Edit implies read, so the two questions the layer ever asks are
+answered by one helper:
+
+```ts
+grantedFieldIds(rules, FieldAccess.Read)  // everything those rules expose
+grantedFieldIds(rules, FieldAccess.Edit)  // only what they let you write
+```
+
+Which rules get passed in is what differs by operation:
+
+| Operation | Rules | Level |
+| --- | --- | --- |
+| read a record | rules granting read whose clauses matched it | read |
+| update a record | rules granting edit whose clauses matched it | edit |
+| create a record | rules with `canCreate` (no clauses) | edit |
+
+Separating the level from the rule's access types is the whole point: before
+this, a rule granting read and edit granted every field it named at both, so
+"everyone in support can see the account owner but only managers can change it"
+needed two rules with duplicated clauses. Now it is one rule with two grants.
+
+Two guards keep the pairing honest. A field granted as editable by a rule that
+grants neither edit nor create is rejected at authoring time, since nothing
+could ever act on it. And when a rule names the same field twice, the wider
+grant wins, so a duplicate cannot quietly narrow access.
+
 ## Projection
 
 `SecurityLayer.project` builds the caller's view of a record. Fields outside
-the union of the matching rules' grants are omitted from `values` entirely --
-not nulled, not empty-stringed. A caller cannot tell a field they may not read
-from one that does not exist.
+the read-level union of the matching rules' grants are omitted from `values`
+entirely -- not nulled, not empty-stringed. A caller cannot tell a field they
+may not read from one that does not exist.
+
+The view returned by a create or update shows the caller's *readable* fields,
+which is wider than what they just wrote: a read-only grant means you see the
+field you were not allowed to set.
 
 ## Storage shape
 
@@ -178,9 +211,18 @@ the equivalent multi-select.
 `applySchema` creates missing tables and then adds any columns an existing
 table lacks (`addMissingColumns`, via `PRAGMA table_info`). SQLite needs a
 default when adding a NOT NULL column to a table that may hold rows, so each
-column type has a zero value. That covers additive change, which is what has
-been needed so far; renames, drops and type changes would need real migration
-files and a version table.
+column type has a zero value.
+
+That covers additive change. It cannot cover a rename, so the one rename so far
+is handled explicitly: `InstallService.carryForwardFieldGrants` copies any
+`securityRuleField` rows into `securityRuleFieldGrant` at `access: 'edit'` --
+the level that preserves the old behaviour, where a granted field was writable
+if the rule allowed writing at all -- and then drops the legacy table. It runs
+inside `install()`, so it happens on boot, once, and is a no-op afterwards.
+
+This is the pattern to copy rather than the mechanism to reuse. A third or
+fourth of these wants a real migrations directory and a schema-version row,
+not more one-off methods on `InstallService`.
 
 ## What is deliberately not built
 

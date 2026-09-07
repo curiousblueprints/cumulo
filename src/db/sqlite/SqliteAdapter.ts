@@ -109,6 +109,19 @@ export class SqliteAdapter implements DatabaseAdapter {
     }
   }
 
+  async hasTable(table: string): Promise<boolean> {
+    const rows = this.all(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+      [table],
+    );
+    return rows.length > 0;
+  }
+
+  async dropTable(table: string): Promise<void> {
+    this.handle().exec(`DROP TABLE IF EXISTS ${quote(table)}`);
+    this.columnTypes.delete(table);
+  }
+
   private rememberTypes(table: TableSchema): void {
     const types = new Map<string, ColumnDef['type']>();
     for (const column of table.columns) types.set(column.name, column.type);

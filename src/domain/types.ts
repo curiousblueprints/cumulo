@@ -49,6 +49,15 @@ export enum ClauseMatch {
   Custom = 'custom',
 }
 
+/**
+ * How far a single field grant reaches. Edit implies read: a field you may
+ * change is necessarily a field you may see.
+ */
+export enum FieldAccess {
+  Read = 'read',
+  Edit = 'edit',
+}
+
 /** The data types a field can hold. */
 export enum FieldType {
   Text = 'text',
@@ -185,10 +194,19 @@ export interface SecurityRuleClause {
   createdAt: string;
 }
 
-export interface SecurityRuleField {
+/**
+ * One field made accessible by one rule, and how far that reach goes.
+ *
+ * This is what makes field security granular: a rule that grants read and edit
+ * on its records can still expose most of its fields read-only and only a few
+ * as editable, rather than all of them at whatever the rule's widest access
+ * happens to be.
+ */
+export interface SecurityRuleFieldGrant {
   id: Id;
   securityRuleId: Id;
   fieldId: Id;
+  access: FieldAccess;
   createdAt: string;
 }
 

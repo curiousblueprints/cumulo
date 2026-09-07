@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import type { AddressInfo } from 'node:net';
 import test from 'node:test';
 import { Application } from '../src/app/Application.js';
+import { FieldAccess } from '../src/domain/types.js';
 import { createServer } from '../src/presentation/http/server.js';
 
 /** A tiny cookie-jar client, so the tests exercise the real request path. */
@@ -43,6 +44,8 @@ async function serve(): Promise<{ app: Application; base: string; close: () => P
   const server = createServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address() as AddressInfo;
+  // A test that fails before close() would otherwise keep the runner alive.
+  server.unref();
   return {
     app,
     base: `http://127.0.0.1:${port}`,
@@ -205,7 +208,7 @@ test('unknown paths are 404 and wrong methods are 405', async () => {
   await close();
 });
 
-test('a multi-select posts every selected value', async () => {
+test('the rule form posts a multi-select and one access level per field', async () => {
   const { app, base, close } = await serve();
   const client = new Client(base);
   await client.post('/setup', { username: 'root', email: 'r@e.com', password: 'correct horse' });
@@ -213,25 +216,49 @@ test('a multi-select posts every selected value', async () => {
   const std = (await app.metadata.listNamespaces(admin))[0];
   assert.ok(std);
   const table = await app.metadata.createTable(admin, { namespaceId: std.id, name: 'Thing' });
-  const field = await app.metadata.createField(admin, {
+  const title = await app.metadata.createField(admin, {
     tableId: table.id,
     name: 'title',
     type: 'text' as never,
   });
+  const internal = await app.metadata.createField(admin, {
+    tableId: table.id,
+    name: 'internalNote',
+    type: 'text' as never,
+  });
 
   const page = await (await client.get(`/admin/tables/${table.id}`)).text();
+  // Every field on the table gets its own access picker.
+  assert.match(page, new RegExp(`name="grant_${title.id}"`));
+  assert.match(page, new RegExp(`name="grant_${internal.id}"`));
+
   await client.post('/admin/rules', {
     _csrf: csrf(page),
     tableId: table.id,
     name: 'Read and edit',
     accessTypes: ['read', 'edit'],
     clauseMatch: 'all',
-    fieldIds: [field.id],
+    [`grant_${title.id}`]: 'edit',
+    [`grant_${internal.id}`]: 'read',
   });
 
   const rules = await app.metadata.listSecurityRules(admin);
   assert.equal(rules.length, 1);
+  // The multi-select posted both values.
   assert.deepEqual(rules[0]?.accessTypes.sort(), ['edit', 'read']);
+
+  const described = await app.metadata.describeRulesFor(admin, table.id);
+  assert.deepEqual(
+    described[0]?.grants.map((grant) => [grant.field, grant.access]).sort(),
+    [
+      ['internalNote', FieldAccess.Read],
+      ['title', FieldAccess.Edit],
+    ].sort(),
+  );
+
+  // ...and the console shows what the rule exposes.
+  const after = await (await client.get(`/admin/tables/${table.id}`)).text();
+  assert.match(after, /read\+edit/);
   await close();
 });
 
@@ -259,7 +286,7 @@ test('the UI offers creation only where a rule permits it', async () => {
     name: 'Read notes',
     tableId: table.id,
     accessTypes: ['read' as never],
-    fieldIds: [body.id],
+    fieldGrants: [{ fieldId: body.id, access: FieldAccess.Read }],
   });
   await app.metadata.assignRuleToRole(admin, role.id, readOnly.id);
   await app.metadata.createUser(admin, {

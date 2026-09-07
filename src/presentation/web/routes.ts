@@ -3,6 +3,7 @@ import {
   AccessType,
   ClauseMatch,
   ClauseOperator,
+  FieldAccess,
   FieldType,
   type FieldDef,
   type RecordView,
@@ -521,6 +522,7 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
     const token = request.session?.csrfToken;
     const fieldOptions = fields.map((field) => ({ id: field.id, label: field.name }));
     const tables = await app.metadata.listTables(context);
+    const tableRules = await app.metadata.describeRulesFor(context, table.id);
 
     return html(
       page(
@@ -566,6 +568,35 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
              <button>Add field</button></form>
          </section>
 
+         <h2>Rules on this table</h2>
+         <section class="card">
+           <table><thead><tr><th>Rule</th><th>Record access</th><th>Create</th>
+             <th>Field access</th></tr></thead><tbody>
+             ${
+               tableRules
+                 .map(
+                   (entry) =>
+                     `<tr><td>${escapeHtml(entry.rule.name)}</td>
+                        <td class="muted">${escapeHtml(
+                          entry.rule.accessTypes.join(', ') || '—',
+                        )}</td>
+                        <td class="muted">${entry.rule.canCreate ? 'yes' : 'no'}</td>
+                        <td class="muted">${
+                          entry.grants
+                            .map(
+                              (grant) =>
+                                `<code>${escapeHtml(grant.field)}</code> ${escapeHtml(
+                                  grant.access === FieldAccess.Edit ? 'read+edit' : 'read',
+                                )}`,
+                            )
+                            .join('<br>') || 'no fields granted'
+                        }</td></tr>`,
+                 )
+                 .join('') || '<tr><td colspan="4" class="muted">No rules on this table.</td></tr>'
+             }
+           </tbody></table>
+         </section>
+
          <h2>New security rule</h2>
          <section class="card">
            <p class="muted">A rule grants access to records of this table that satisfy its clauses,
@@ -590,10 +621,26 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
                <label>Custom logic (e.g. <code>1 AND (2 OR 3)</code>)</label>
                <input name="clauseLogic" placeholder="only used when matching is custom"></div>
              </div>
-             <label>Fields this rule grants</label>
-             <select name="fieldIds" multiple size="${Math.min(6, Math.max(2, fields.length))}">
-               ${optionList(fieldOptions)}
-             </select>
+             <h2>Field access</h2>
+             <p class="muted">Each field is granted separately. Read-only makes a field visible;
+               editable also lets it be written, which needs the rule to grant edit or create.</p>
+             <table><thead><tr><th>Field</th><th>Access</th></tr></thead><tbody>
+               ${
+                 fields
+                   .map(
+                     (field) =>
+                       `<tr><td><code>${escapeHtml(field.name)}</code>
+                          <span class="muted">${escapeHtml(field.type)}</span></td>
+                        <td><select name="${GRANT_PREFIX}${escapeHtml(field.id)}" style="margin:0">
+                          <option value="" selected>No access</option>
+                          <option value="${FieldAccess.Read}">Read only</option>
+                          <option value="${FieldAccess.Edit}">Read and edit</option>
+                        </select></td></tr>`,
+                   )
+                   .join('') ||
+                 '<tr><td colspan="2" class="muted">Add a field first.</td></tr>'
+               }
+             </tbody></table>
              ${[1, 2, 3]
                .map(
                  (index) => `<h2>Clause ${index}</h2>
@@ -730,7 +777,13 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
         clauseMatch: (body['clauseMatch'] ?? ClauseMatch.All) as ClauseMatch,
         clauseLogic: body['clauseLogic'] || null,
         clauses,
-        fieldIds: multi(request, 'fieldIds'),
+        // One select per field, so each grant carries its own access level.
+        fieldGrants: Object.entries(body)
+          .filter(([key, value]) => key.startsWith(GRANT_PREFIX) && value.length > 0)
+          .map(([key, value]) => ({
+            fieldId: key.slice(GRANT_PREFIX.length),
+            access: value as FieldAccess,
+          })),
       });
       return 'Rule created';
     }),
@@ -750,6 +803,9 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
 }
 
 // --- helpers -------------------------------------------------------------
+
+/** Form-field prefix carrying one field's grant on the rule form. */
+const GRANT_PREFIX = 'grant_';
 
 /** One selectable target per lookup field, keyed by field id. */
 type LookupOptions = Map<string, { id: string; label: string }[]>;

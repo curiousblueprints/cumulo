@@ -82,6 +82,12 @@ export interface DatabaseAdapter {
   /** Create anything in `schema` that does not exist yet. Idempotent. */
   applySchema(schema: Schema): Promise<void>;
 
+  /** Whether a table exists, for carrying an older installation forward. */
+  hasTable(table: string): Promise<boolean>;
+
+  /** Remove a table and everything in it. Used only by migrations. */
+  dropTable(table: string): Promise<void>;
+
   insert(table: string, row: Row): Promise<Row>;
   /** Returns the updated row, or null when no row has that id. */
   update(table: string, id: Scalar, patch: Row): Promise<Row | null>;

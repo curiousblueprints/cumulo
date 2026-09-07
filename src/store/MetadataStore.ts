@@ -4,6 +4,7 @@ import {
   AccessType,
   ClauseMatch,
   ClauseOperator,
+  FieldAccess,
   FieldType,
   type FieldDef,
   type Id,
@@ -14,7 +15,7 @@ import {
   type SecurityRoleRule,
   type SecurityRule,
   type SecurityRuleClause,
-  type SecurityRuleField,
+  type SecurityRuleFieldGrant,
   type TableDef,
   type User,
   type ValueRow,
@@ -309,22 +310,22 @@ export class MetadataStore {
     ).map(toClause);
   }
 
-  async insertSecurityRuleField(link: SecurityRuleField): Promise<SecurityRuleField> {
-    await this.db.insert(T.securityRuleField, { ...link });
-    return link;
+  async insertFieldGrant(grant: SecurityRuleFieldGrant): Promise<SecurityRuleFieldGrant> {
+    await this.db.insert(T.securityRuleFieldGrant, { ...grant });
+    return grant;
   }
 
-  async listRuleFieldsForRules(ruleIds: Id[]): Promise<SecurityRuleField[]> {
+  async listFieldGrantsForRules(ruleIds: Id[]): Promise<SecurityRuleFieldGrant[]> {
     if (ruleIds.length === 0) return [];
     return (
-      await this.db.find(T.securityRuleField, {
+      await this.db.find(T.securityRuleFieldGrant, {
         where: [{ column: 'securityRuleId', operator: 'in', value: ruleIds }],
       })
-    ).map(toRuleField);
+    ).map(toFieldGrant);
   }
 
-  async deleteSecurityRuleField(id: Id): Promise<boolean> {
-    return this.db.delete(T.securityRuleField, id);
+  async deleteFieldGrant(id: Id): Promise<boolean> {
+    return this.db.delete(T.securityRuleFieldGrant, id);
   }
 
   // --- record and value --------------------------------------------------
@@ -502,11 +503,13 @@ function toClause(row: Row): SecurityRuleClause {
   };
 }
 
-function toRuleField(row: Row): SecurityRuleField {
+function toFieldGrant(row: Row): SecurityRuleFieldGrant {
   return {
     id: str(row, 'id'),
     securityRuleId: str(row, 'securityRuleId'),
     fieldId: str(row, 'fieldId'),
+    // A grant with no level recorded is read-only: the conservative reading.
+    access: str(row, 'access') === FieldAccess.Edit ? FieldAccess.Edit : FieldAccess.Read,
     createdAt: str(row, 'createdAt'),
   };
 }

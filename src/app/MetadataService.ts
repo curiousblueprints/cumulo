@@ -4,6 +4,7 @@ import {
   ALL_ACCESS_TYPES,
   ClauseMatch,
   ClauseOperator,
+  FieldAccess,
   FieldType,
   UNARY_OPERATORS,
   type FieldDef,
@@ -14,7 +15,7 @@ import {
   type SecurityRoleRule,
   type SecurityRule,
   type SecurityRuleClause,
-  type SecurityRuleField,
+  type SecurityRuleFieldGrant,
   type TableDef,
   type User,
 } from '../domain/types.js';
@@ -33,6 +34,15 @@ export interface ClauseInput {
   compareFieldId?: Id | null;
 }
 
+/**
+ * A field this rule exposes, and how far. `access` defaults to read-only:
+ * making a field writable is the wider claim, so it has to be asked for.
+ */
+export interface FieldGrantInput {
+  fieldId: Id;
+  access?: FieldAccess;
+}
+
 export interface SecurityRuleInput {
   name: string;
   tableId: Id;
@@ -43,8 +53,14 @@ export interface SecurityRuleInput {
   clauseMatch?: ClauseMatch;
   clauseLogic?: string | null;
   clauses?: ClauseInput[];
-  /** Fields the rule grants access to when it applies. */
-  fieldIds?: Id[];
+  /** Fields the rule exposes when it applies, each with its own access. */
+  fieldGrants?: FieldGrantInput[];
+}
+
+/** A rule plus what it exposes, for display. */
+export interface RuleDescription {
+  rule: SecurityRule;
+  grants: { field: string; access: FieldAccess }[];
 }
 
 export interface UserInput {
@@ -364,11 +380,22 @@ export class MetadataService {
         );
       }
 
-      const grantedFields = input.fieldIds ?? [];
-      for (const fieldId of grantedFields) {
-        if (!fieldIds.has(fieldId)) {
+      const grants = new Map<Id, FieldAccess>();
+      for (const grant of input.fieldGrants ?? []) {
+        if (!fieldIds.has(grant.fieldId)) {
           throw new ValidationError('A granted field belongs to another table');
         }
+        const access = grant.access ?? FieldAccess.Read;
+        if (access !== FieldAccess.Read && access !== FieldAccess.Edit) {
+          throw new ValidationError(`Unknown field access: ${String(access)}`);
+        }
+        if (access === FieldAccess.Edit && !accessTypes.includes(AccessType.Edit) && !canCreate) {
+          throw new ValidationError(
+            'A field can only be granted as editable by a rule that grants edit or create',
+          );
+        }
+        // The widest grant wins if a field is named twice.
+        if (grants.get(grant.fieldId) !== FieldAccess.Edit) grants.set(grant.fieldId, access);
       }
 
       const rule: SecurityRule = {
@@ -398,14 +425,15 @@ export class MetadataService {
         await store.insertSecurityRuleClause(row);
       }
 
-      for (const fieldId of new Set(grantedFields)) {
-        const link: SecurityRuleField = {
+      for (const [fieldId, access] of grants) {
+        const grant: SecurityRuleFieldGrant = {
           id: newId(),
           securityRuleId: rule.id,
           fieldId,
+          access,
           createdAt: nowIso(),
         };
-        await store.insertSecurityRuleField(link);
+        await store.insertFieldGrant(grant);
       }
 
       return rule;
@@ -458,6 +486,32 @@ export class MetadataService {
 
   listReadableFields(context: SecurityContext, tableId: Id): Promise<FieldDef[]> {
     return this.security.listReadableFields(context, tableId);
+  }
+
+  /**
+   * The rules on one table, each with its field grants resolved to names, for
+   * the setup console to show what a rule actually exposes.
+   */
+  async describeRulesFor(
+    context: SecurityContext,
+    tableId: Id,
+  ): Promise<RuleDescription[]> {
+    return this.security.readAsAdministrator(context, async (store) => {
+      const rules = (await store.listSecurityRules()).filter((rule) => rule.tableId === tableId);
+      const grants = await store.listFieldGrantsForRules(rules.map((rule) => rule.id));
+      const fieldNames = new Map(
+        (await store.listFields(tableId)).map((field) => [field.id, field.name]),
+      );
+      return rules.map((rule) => ({
+        rule,
+        grants: grants
+          .filter((grant) => grant.securityRuleId === rule.id)
+          .map((grant) => ({
+            field: fieldNames.get(grant.fieldId) ?? grant.fieldId,
+            access: grant.access,
+          })),
+      }));
+    });
   }
 
   async listSecurityRules(context: SecurityContext): Promise<SecurityRule[]> {

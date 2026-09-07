@@ -108,7 +108,7 @@ tables be defined at runtime.
 | `field` | Fields on a table, with a type and an owning namespace. |
 | `securityRule` | Access types, create, and clause matching, for one table. |
 | `securityRuleClause` | The predicates deciding which records a rule covers. |
-| `securityRuleField` | The fields a rule grants when it applies. |
+| `securityRuleFieldGrant` | The fields a rule exposes when it applies, each read-only or editable. |
 | `securityRoleRule` | Junction: this rule applies to this role. |
 | `record` | One record in a custom table. |
 | `value` | One field's value on one record. |
@@ -125,9 +125,17 @@ tables be defined at runtime.
 4. **Then rules, per record.** A rule grants read/edit/delete on one table to
    the records satisfying its clauses (`all`, `any`, or custom logic such as
    `1 AND (2 OR 3)`).
-5. **Then fields.** A record's visible fields are the union of the fields
-   named by the rules that matched it. A field no rule grants does not appear
-   in the response at all, and an edit may not touch it.
+5. **Then fields, one grant at a time.** Each `securityRuleFieldGrant` names a
+   field and says how far the rule's reach on it goes: **read-only** or
+   **editable**. A record's visible fields are every field granted at either
+   level by the rules that matched it; its writable fields are only those
+   granted as editable. A field no rule grants does not appear at all.
+
+   So a rule that grants read and edit on its records can still expose most of
+   its fields read-only and only a few as editable -- field security is set per
+   field, not inherited from the widest thing the rule allows. A grant with no
+   level stated is read-only, and a field can only be granted as editable by a
+   rule that grants edit or create.
 6. **Creating is separate, and table-level.** A rule's `canCreate` says whether
    it permits inserting into its table. The clauses play no part -- there is no
    record yet for them to describe -- but the rule's fields still bound what a
@@ -167,9 +175,10 @@ and none of them owns anything.
 npm test
 ```
 
-38 tests over the adapter, the clause-logic parser, the security layer
-(hierarchy inheritance, record and field filtering, namespace gating, metadata
-protection) and the HTTP surface end to end.
+57 tests over the adapter, the clause-logic parser, the security layer
+(hierarchy inheritance, record filtering, per-field grants, namespace gating,
+metadata protection), lookups, the rename migration, and the HTTP surface end
+to end.
 
 ## Assumptions and decisions
 
@@ -183,9 +192,10 @@ Recorded so they are easy to overturn:
   transferring ownership does on a hierarchy-scoped platform.
 - **"Some" clause matching is `custom`**, an expression over clause sequence
   numbers supporting `AND`, `OR`, `NOT` and parentheses.
-- **Field access is a union** across every rule that matched the record. Fields
-  a user cannot write are never modified: an update naming one is refused
-  rather than silently dropped, so the caller learns nothing was written.
+- **Field access is a union** across every rule that matched the record, taking
+  the widest grant on each field. Fields a user cannot write are never
+  modified: an update naming one is refused rather than silently dropped, so
+  the caller learns nothing was written.
 - **Empty values are read literally.** An empty field is not equal to "x", so
   `field != x` matches it, and two empty values are equal to each other. The
   ordering and text operators have nothing to compare, so they are false. Ask
@@ -193,5 +203,7 @@ Recorded so they are easy to overturn:
 - **Security rules target custom tables only.** Platform metadata is not
   described as `table`/`field` rows, so only Administrator can change it.
 - `applySchema` adds columns an existing database is missing, which is enough
-  for additive changes. Anything destructive would need a real migration.
+  for additive changes. The one rename so far (`securityRuleField` ->
+  `securityRuleFieldGrant`) is carried forward explicitly at install time, and
+  those older grants arrive editable so behaviour is unchanged.
 - Sessions are in-memory, so restarting the server signs everyone out.

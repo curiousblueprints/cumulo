@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Application } from '../src/app/Application.js';
-import { AccessType, FieldType, STD_NAMESPACE, type Id } from '../src/domain/types.js';
+import { AccessType, FieldAccess, FieldType, STD_NAMESPACE, type Id } from '../src/domain/types.js';
 import type { SecurityContext } from '../src/security/context.js';
 import { ValidationError } from '../src/security/errors.js';
 
@@ -226,14 +226,14 @@ test('a lookup can only be set to a record the user is allowed to see', async ()
       name: 'Accounts',
       tableId: account.id,
       accessTypes: [AccessType.Read],
-      fieldIds: [accountName.id],
+      fieldGrants: [{ fieldId: accountName.id, access: FieldAccess.Read }],
     },
     {
       name: 'Contacts',
       tableId: contact.id,
       accessTypes: [AccessType.Read],
       canCreate: true,
-      fieldIds: [contactName.id, lookup.id],
+      fieldGrants: [{ fieldId: contactName.id, access: FieldAccess.Edit }, { fieldId: lookup.id, access: FieldAccess.Edit }],
     },
   ]) {
     const created = await app.metadata.createSecurityRule(admin, rule);

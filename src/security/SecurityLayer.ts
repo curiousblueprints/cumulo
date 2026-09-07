@@ -1,5 +1,6 @@
 import {
   AccessType,
+  FieldAccess,
   FieldType,
   type FieldDef,
   type Id,
@@ -12,7 +13,7 @@ import {
 } from '../domain/types.js';
 import type { MetadataStore } from '../store/MetadataStore.js';
 import { newId, nowIso } from '../util/index.js';
-import { ruleApplies, type CompiledRule, type ValueMap } from './clauses.js';
+import { grantedFieldIds, ruleApplies, type CompiledRule, type ValueMap } from './clauses.js';
 import type { SecurityContext } from './context.js';
 import { AccessDeniedError, NotFoundError, ValidationError } from './errors.js';
 import {
@@ -130,7 +131,10 @@ export class SecurityLayer {
     const permissions = await this.permissions(context);
     const fields = await this.store.listFields(tableId);
     if (permissions.isAdministrator) return fields;
-    const allowed = fieldUnion(rulesGranting(permissions, tableId, AccessType.Read));
+    const allowed = grantedFieldIds(
+      rulesGranting(permissions, tableId, AccessType.Read),
+      FieldAccess.Read,
+    );
     return fields.filter((field) => allowed.has(field.id));
   }
 
@@ -172,7 +176,9 @@ export class SecurityLayer {
         ruleApplies(rule, recordValues, fields, context.user),
       );
       if (matching.length === 0) continue;
-      results.push(this.project(record, recordValues, fields, fieldUnion(matching)));
+      results.push(
+        this.project(record, recordValues, fields, grantedFieldIds(matching, FieldAccess.Read)),
+      );
     }
     return results;
   }
@@ -191,7 +197,7 @@ export class SecurityLayer {
     );
     // Indistinguishable from "does not exist", by design.
     if (matching.length === 0) throw new NotFoundError(`No such record: ${recordId}`);
-    return this.project(record, values, fields, fieldUnion(matching));
+    return this.project(record, values, fields, grantedFieldIds(matching, FieldAccess.Read));
   }
 
   /**
@@ -224,7 +230,9 @@ export class SecurityLayer {
       if (granting.length === 0) {
         throw new AccessDeniedError(`No permission to create records in "${table.name}"`);
       }
-      writable = fieldUnion(granting);
+      // Only fields the rule grants as editable may be set on the way in; a
+      // read-only grant makes the field visible, not writable.
+      writable = grantedFieldIds(granting, FieldAccess.Edit);
       for (const [fieldId, value] of stored) {
         if (value !== null && !writable.has(fieldId)) {
           throw new AccessDeniedError(
@@ -250,7 +258,8 @@ export class SecurityLayer {
       }
     });
 
-    return this.project(record, stored, fields, writable);
+    // Show back what the caller may read, which is wider than what they wrote.
+    return this.project(record, stored, fields, this.readableAfterWrite(permissions, table.id));
   }
 
   /**
@@ -280,7 +289,7 @@ export class SecurityLayer {
         ruleApplies(rule, current, fields, context.user),
       );
       if (matching.length === 0) throw new NotFoundError(`No such record: ${recordId}`);
-      writable = fieldUnion(matching);
+      writable = grantedFieldIds(matching, FieldAccess.Edit);
       for (const fieldId of patch.keys()) {
         if (!writable.has(fieldId)) {
           throw new AccessDeniedError(
@@ -307,7 +316,12 @@ export class SecurityLayer {
 
     const merged = new Map(current);
     for (const [fieldId, value] of patch) merged.set(fieldId, value);
-    return this.project({ ...record, updatedAt }, merged, fields, writable);
+    return this.project(
+      { ...record, updatedAt },
+      merged,
+      fields,
+      this.readableAfterWrite(permissions, table.id),
+    );
   }
 
   async deleteRecord(context: SecurityContext, recordId: Id): Promise<void> {
@@ -363,8 +377,21 @@ export class SecurityLayer {
     const permissions = await this.permissions(context);
     const fields = await this.store.listFields(tableId);
     if (permissions.isAdministrator) return fields;
-    const granted = fieldUnion(select(permissions));
+    const granted = grantedFieldIds(select(permissions), FieldAccess.Edit);
     return fields.filter((field) => granted.has(field.id));
+  }
+
+  /**
+   * The fields to show in the view returned after a write. Clauses are not
+   * re-run here -- the caller has just been told the write succeeded -- so this
+   * is the read grant for the table, not for the specific record.
+   */
+  private readableAfterWrite(permissions: PermissionSet, tableId: Id): ReadonlySet<Id> | null {
+    if (permissions.isAdministrator) return null;
+    return grantedFieldIds(
+      rulesGranting(permissions, tableId, AccessType.Read),
+      FieldAccess.Read,
+    );
   }
 
   // --- internals ---------------------------------------------------------
@@ -491,12 +518,6 @@ export class SecurityLayer {
       values: projected,
     };
   }
-}
-
-function fieldUnion(rules: CompiledRule[]): ReadonlySet<Id> {
-  const union = new Set<Id>();
-  for (const rule of rules) for (const fieldId of rule.fieldIds) union.add(fieldId);
-  return union;
 }
 
 function nameIndex(fields: ReadonlyMap<Id, FieldDef>): Map<string, FieldDef> {

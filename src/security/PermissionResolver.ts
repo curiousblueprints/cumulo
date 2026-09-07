@@ -1,4 +1,4 @@
-import { AccessType, STD_NAMESPACE, type Id } from '../domain/types.js';
+import { AccessType, FieldAccess, STD_NAMESPACE, type Id } from '../domain/types.js';
 import type { MetadataStore } from '../store/MetadataStore.js';
 import type { CompiledRule } from './clauses.js';
 import type { SecurityContext } from './context.js';
@@ -65,7 +65,7 @@ export class PermissionResolver {
     const ruleIds = [...new Set(links.map((link) => link.securityRuleId))];
     const rules = await this.store.listSecurityRulesByIds(ruleIds);
     const clauses = await this.store.listClausesForRules(ruleIds);
-    const ruleFields = await this.store.listRuleFieldsForRules(ruleIds);
+    const fieldGrants = await this.store.listFieldGrantsForRules(ruleIds);
 
     const rulesByTable = new Map<Id, CompiledRule[]>();
     for (const rule of rules) {
@@ -78,8 +78,10 @@ export class PermissionResolver {
         clauseMatch: rule.clauseMatch,
         clauseLogic: rule.clauseLogic,
         clauses: clauses.filter((clause) => clause.securityRuleId === rule.id),
-        fieldIds: new Set(
-          ruleFields.filter((link) => link.securityRuleId === rule.id).map((link) => link.fieldId),
+        grants: new Map<Id, FieldAccess>(
+          fieldGrants
+            .filter((grant) => grant.securityRuleId === rule.id)
+            .map((grant) => [grant.fieldId, grant.access]),
         ),
       };
       const list = rulesByTable.get(rule.tableId);

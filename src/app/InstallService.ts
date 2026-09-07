@@ -1,7 +1,8 @@
-import { PLATFORM_SCHEMA } from '../db/schema.js';
+import { LEGACY_SECURITY_RULE_FIELD, PLATFORM_SCHEMA, T } from '../db/schema.js';
 import type { DatabaseAdapter } from '../db/types.js';
 import {
   ADMINISTRATOR_ROLE,
+  FieldAccess,
   STD_NAMESPACE,
   type Namespace,
   type SecurityRole,
@@ -36,6 +37,7 @@ export class InstallService {
   /** Idempotent: safe to run on every boot. */
   async install(): Promise<void> {
     await this.db.applySchema(PLATFORM_SCHEMA);
+    await this.carryForwardFieldGrants();
     await this.db.transaction(async () => {
       if (!(await this.store.getNamespaceByName(STD_NAMESPACE))) {
         const namespace: Namespace = {
@@ -58,6 +60,34 @@ export class InstallService {
         };
         await this.store.insertSecurityRole(role);
       }
+    });
+  }
+
+  /**
+   * `securityRuleField` became `securityRuleFieldGrant`, which carries an
+   * access level per field. Rows written under the old name granted a field at
+   * whatever the rule allowed, so they come across as editable -- the reading
+   * that leaves behaviour unchanged. New grants default to read-only instead.
+   *
+   * `applySchema` only ever adds, so a rename needs this explicit step.
+   */
+  private async carryForwardFieldGrants(): Promise<void> {
+    if (!(await this.db.hasTable(LEGACY_SECURITY_RULE_FIELD))) return;
+    await this.db.transaction(async () => {
+      const legacy = await this.db.find(LEGACY_SECURITY_RULE_FIELD);
+      const existing = await this.db.count(T.securityRuleFieldGrant);
+      if (existing === 0) {
+        for (const row of legacy) {
+          await this.db.insert(T.securityRuleFieldGrant, {
+            id: row['id'] ?? newId(),
+            securityRuleId: row['securityRuleId'] ?? '',
+            fieldId: row['fieldId'] ?? '',
+            access: FieldAccess.Edit,
+            createdAt: row['createdAt'] ?? nowIso(),
+          });
+        }
+      }
+      await this.db.dropTable(LEGACY_SECURITY_RULE_FIELD);
     });
   }
 

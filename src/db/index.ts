@@ -2,7 +2,7 @@ import { SqliteAdapter } from './sqlite/SqliteAdapter.js';
 import type { DatabaseAdapter } from './types.js';
 
 export * from './types.js';
-export { PLATFORM_SCHEMA, T } from './schema.js';
+export { LEGACY_SECURITY_RULE_FIELD, PLATFORM_SCHEMA, T } from './schema.js';
 export { SqliteAdapter } from './sqlite/SqliteAdapter.js';
 
 export interface DatabaseConfig {

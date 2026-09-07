@@ -1,6 +1,7 @@
 import {
   ClauseMatch,
   ClauseOperator,
+  FieldAccess,
   FieldType,
   UNARY_OPERATORS,
   type FieldDef,
@@ -138,7 +139,7 @@ function blankToNull(value: string | null): string | null {
   return value === null || value === '' ? null : value;
 }
 
-/** A rule with its clauses and accessible fields resolved once, up front. */
+/** A rule with its clauses and field grants resolved once, up front. */
 export interface CompiledRule {
   id: Id;
   name: string;
@@ -149,7 +150,26 @@ export interface CompiledRule {
   clauseMatch: ClauseMatch;
   clauseLogic: string | null;
   clauses: SecurityRuleClause[];
-  fieldIds: ReadonlySet<Id>;
+  /** Field id -> how far this rule's grant on it reaches. */
+  grants: ReadonlyMap<Id, FieldAccess>;
+}
+
+/**
+ * The fields these rules expose at `access` or wider. Edit implies read, so
+ * asking for read returns every granted field and asking for edit returns only
+ * the editable ones.
+ */
+export function grantedFieldIds(
+  rules: readonly CompiledRule[],
+  access: FieldAccess,
+): ReadonlySet<Id> {
+  const union = new Set<Id>();
+  for (const rule of rules) {
+    for (const [fieldId, granted] of rule.grants) {
+      if (access === FieldAccess.Read || granted === FieldAccess.Edit) union.add(fieldId);
+    }
+  }
+  return union;
 }
 
 /**

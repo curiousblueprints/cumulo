@@ -4,6 +4,12 @@ import type { Schema } from './types.js';
  * Physical storage names. The platform's own metadata lives in real tables;
  * only user-defined ("custom") tables are stored as `record` + `value` rows.
  */
+/**
+ * The pre-`securityRuleFieldGrant` name of the field-grant junction. Kept only
+ * so an installation created before the rename can be carried forward.
+ */
+export const LEGACY_SECURITY_RULE_FIELD = 'securityRuleField';
+
 export const T = {
   namespace: 'namespace',
   securityRole: 'securityRole',
@@ -14,7 +20,7 @@ export const T = {
   table: 'table',
   field: 'field',
   securityRuleClause: 'securityRuleClause',
-  securityRuleField: 'securityRuleField',
+  securityRuleFieldGrant: 'securityRuleFieldGrant',
   record: 'record',
   value: 'value',
 } as const;
@@ -203,7 +209,7 @@ export const PLATFORM_SCHEMA: Schema = [
     uniqueConstraints: [['securityRuleId', 'sequence']],
   },
   {
-    name: T.securityRuleField,
+    name: T.securityRuleFieldGrant,
     primaryKey: 'id',
     columns: [
       id,
@@ -217,6 +223,8 @@ export const PLATFORM_SCHEMA: Schema = [
         type: 'text',
         references: { table: T.field, column: 'id', onDelete: 'cascade' },
       },
+      /** A FieldAccess value: 'read' or 'edit'. */
+      { name: 'access', type: 'text' },
       createdAt,
     ],
     uniqueConstraints: [['securityRuleId', 'fieldId']],

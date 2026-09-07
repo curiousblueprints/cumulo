@@ -3,6 +3,7 @@ import test from 'node:test';
 import { Application } from '../src/app/Application.js';
 import {
   AccessType,
+  FieldAccess,
   ClauseMatch,
   ClauseOperator,
   FieldType,
@@ -166,7 +167,7 @@ test('rules gate records by clause and fields by grant', async () => {
       { fieldId: amount.id, operator: ClauseOperator.GreaterThan, targetValue: '50' },
     ],
     // `secret` is deliberately left out of the grant.
-    fieldIds: [amount.id, owner.id],
+    fieldGrants: [{ fieldId: amount.id, access: FieldAccess.Read }, { fieldId: owner.id, access: FieldAccess.Read }],
   });
   await app.metadata.assignRuleToRole(admin, role.id, rule.id);
   await app.metadata.createUser(admin, {
@@ -229,7 +230,7 @@ test('creating is a table-level grant, separate from edit', async () => {
     tableId: table.id,
     accessTypes: [AccessType.Read, AccessType.Edit],
     clauses: [{ fieldId: owner.id, operator: ClauseOperator.Equals, targetValue: '$user.username' }],
-    fieldIds: [amount.id, owner.id],
+    fieldGrants: [{ fieldId: amount.id, access: FieldAccess.Edit }, { fieldId: owner.id, access: FieldAccess.Edit }],
   });
   await app.metadata.assignRuleToRole(admin, editors.id, editRule.id);
   await app.metadata.createUser(admin, {
@@ -275,7 +276,7 @@ test('a create grant ignores the clauses but still bounds the fields', async () 
     accessTypes: [AccessType.Read],
     canCreate: true,
     clauses: [{ fieldId: owner.id, operator: ClauseOperator.Equals, targetValue: '$user.username' }],
-    fieldIds: [amount.id, owner.id],
+    fieldGrants: [{ fieldId: amount.id, access: FieldAccess.Edit }, { fieldId: owner.id, access: FieldAccess.Edit }],
   });
   await app.metadata.assignRuleToRole(admin, role.id, rule.id);
   await app.metadata.createUser(admin, {
@@ -353,7 +354,7 @@ test('a role encompasses the access of the roles beneath it', async () => {
     name: 'All invoices',
     tableId: table.id,
     accessTypes: [AccessType.Read],
-    fieldIds: [amount.id, owner.id],
+    fieldGrants: [{ fieldId: amount.id, access: FieldAccess.Read }, { fieldId: owner.id, access: FieldAccess.Read }],
   });
   await app.metadata.assignRuleToRole(admin, rep.id, rule.id);
 
@@ -415,7 +416,7 @@ test('namespace access gates tables outside std', async () => {
     name: 'All gadgets',
     tableId: table.id,
     accessTypes: [AccessType.Read],
-    fieldIds: [name.id],
+    fieldGrants: [{ fieldId: name.id, access: FieldAccess.Read }],
   });
   await app.metadata.assignRuleToRole(admin, role.id, rule.id);
   await app.metadata.createUser(admin, {
@@ -456,7 +457,7 @@ test('custom clause logic decides which records a rule covers', async () => {
       { fieldId: amount.id, operator: ClauseOperator.GreaterThan, targetValue: '500' },
       { fieldId: amount.id, operator: ClauseOperator.GreaterThan, targetValue: '5000' },
     ],
-    fieldIds: [amount.id, owner.id],
+    fieldGrants: [{ fieldId: amount.id, access: FieldAccess.Read }, { fieldId: owner.id, access: FieldAccess.Read }],
   });
   await app.metadata.assignRuleToRole(admin, role.id, rule.id);
   await app.metadata.createUser(admin, {
@@ -510,7 +511,7 @@ test('clauses can compare two fields of the same record', async () => {
     clauses: [
       { fieldId: amount.id, operator: ClauseOperator.GreaterThan, compareFieldId: limit.id },
     ],
-    fieldIds: [amount.id, limit.id],
+    fieldGrants: [{ fieldId: amount.id, access: FieldAccess.Read }, { fieldId: limit.id, access: FieldAccess.Read }],
   });
   await app.metadata.assignRuleToRole(admin, role.id, rule.id);
   await app.metadata.createUser(admin, {
@@ -722,11 +723,163 @@ test('metadata changes take effect for already-authenticated users', async () =>
     name: 'Everything',
     tableId: table.id,
     accessTypes: [AccessType.Read],
-    fieldIds: [amount.id],
+    fieldGrants: [{ fieldId: amount.id, access: FieldAccess.Read }],
   });
   await app.metadata.assignRuleToRole(admin, role.id, rule.id);
 
   // The same context now sees the record: the permission cache was invalidated.
   assert.equal((await app.records.list(lena, table.id)).length, 1);
+  await app.stop();
+});
+
+test('one rule can expose some fields read-only and others editable', async () => {
+  const { app, admin } = await installed();
+  const { table, amount, owner, secret } = await invoiceTable(app, admin);
+
+  const role = await app.metadata.createSecurityRole(admin, {
+    name: 'Collectors',
+    parentId: admin.role.id,
+  });
+  // The point of the grant table: one rule, three fields, three reaches.
+  const rule = await app.metadata.createSecurityRule(admin, {
+    name: 'Work own invoices',
+    tableId: table.id,
+    accessTypes: [AccessType.Read, AccessType.Edit],
+    clauses: [{ fieldId: owner.id, operator: ClauseOperator.Equals, targetValue: '$user.username' }],
+    fieldGrants: [
+      { fieldId: amount.id, access: FieldAccess.Edit },
+      { fieldId: owner.id, access: FieldAccess.Read },
+      // `secret` is granted at neither level, so it stays invisible.
+    ],
+  });
+  await app.metadata.assignRuleToRole(admin, role.id, rule.id);
+  await app.metadata.createUser(admin, {
+    username: 'cass',
+    email: 'c@example.com',
+    password: 'password123',
+    securityRoleId: role.id,
+  });
+  const record = await app.records.create(admin, table.id, {
+    amount: 10,
+    owner: 'cass',
+    secret: 'hidden',
+  });
+  const cass = await app.auth.authenticate('cass', 'password123');
+
+  // Read sees both granted fields, at either level.
+  const view = await app.records.get(cass, record.id);
+  assert.deepEqual(Object.keys(view.values).sort(), ['amount', 'owner']);
+  assert.deepEqual(
+    (await app.metadata.listReadableFields(cass, table.id)).map((field) => field.name).sort(),
+    ['amount', 'owner'],
+  );
+
+  // Only the editable grant may be written.
+  assert.deepEqual(
+    (await app.security.listEditableFields(cass, table.id)).map((field) => field.name),
+    ['amount'],
+  );
+  const updated = await app.records.update(cass, record.id, { amount: 99 });
+  assert.equal(updated.values['amount'], 99);
+  await assert.rejects(
+    () => app.records.update(cass, record.id, { owner: 'someone-else' }),
+    AccessDeniedError,
+  );
+  await assert.rejects(
+    () => app.records.update(cass, record.id, { secret: 'x' }),
+    AccessDeniedError,
+  );
+
+  // The read-only field is genuinely untouched by the refused write.
+  assert.equal((await app.records.get(admin, record.id)).values['owner'], 'cass');
+  void secret;
+  await app.stop();
+});
+
+test('a field cannot be granted as editable by a rule that grants no writing', async () => {
+  const { app, admin } = await installed();
+  const { table, amount } = await invoiceTable(app, admin);
+
+  await assert.rejects(
+    () =>
+      app.metadata.createSecurityRule(admin, {
+        name: 'Read only rule, editable field',
+        tableId: table.id,
+        accessTypes: [AccessType.Read],
+        fieldGrants: [{ fieldId: amount.id, access: FieldAccess.Edit }],
+      }),
+    ValidationError,
+  );
+
+  // A create-only rule may grant editable fields: creating is writing.
+  const created = await app.metadata.createSecurityRule(admin, {
+    name: 'Create only',
+    tableId: table.id,
+    accessTypes: [],
+    canCreate: true,
+    fieldGrants: [{ fieldId: amount.id, access: FieldAccess.Edit }],
+  });
+  assert.equal(created.canCreate, true);
+  await app.stop();
+});
+
+test('a grant defaults to read-only, and read-only fields cannot be set on create', async () => {
+  const { app, admin } = await installed();
+  const { table, amount, owner } = await invoiceTable(app, admin);
+
+  const role = await app.metadata.createSecurityRole(admin, {
+    name: 'Submitters',
+    parentId: admin.role.id,
+  });
+  const rule = await app.metadata.createSecurityRule(admin, {
+    name: 'Submit invoices',
+    tableId: table.id,
+    accessTypes: [AccessType.Read],
+    canCreate: true,
+    fieldGrants: [
+      { fieldId: amount.id, access: FieldAccess.Edit },
+      // No access given, so this is read-only: visible, never written.
+      { fieldId: owner.id },
+    ],
+  });
+  await app.metadata.assignRuleToRole(admin, role.id, rule.id);
+  await app.metadata.createUser(admin, {
+    username: 'sub',
+    email: 's@example.com',
+    password: 'password123',
+    securityRoleId: role.id,
+  });
+  const sub = await app.auth.authenticate('sub', 'password123');
+
+  assert.deepEqual(
+    (await app.security.listCreatableFields(sub, table.id)).map((field) => field.name),
+    ['amount'],
+  );
+  await assert.rejects(
+    () => app.records.create(sub, table.id, { amount: 1, owner: 'sub' }),
+    AccessDeniedError,
+  );
+
+  const record = await app.records.create(sub, table.id, { amount: 1 });
+  // Readable afterwards at both grant levels.
+  assert.deepEqual(Object.keys(record.values).sort(), ['amount', 'owner']);
+  await app.stop();
+});
+
+test('the widest grant wins when a field is named twice', async () => {
+  const { app, admin } = await installed();
+  const { table, amount } = await invoiceTable(app, admin);
+  const rule = await app.metadata.createSecurityRule(admin, {
+    name: 'Twice',
+    tableId: table.id,
+    accessTypes: [AccessType.Read, AccessType.Edit],
+    fieldGrants: [
+      { fieldId: amount.id, access: FieldAccess.Read },
+      { fieldId: amount.id, access: FieldAccess.Edit },
+    ],
+  });
+  const described = await app.metadata.describeRulesFor(admin, table.id);
+  const grants = described.find((entry) => entry.rule.id === rule.id)?.grants ?? [];
+  assert.deepEqual(grants, [{ field: 'amount', access: FieldAccess.Edit }]);
   await app.stop();
 });
