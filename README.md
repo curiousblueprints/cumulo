@@ -166,6 +166,18 @@ text or an **auto number**, chosen when the table is created, and it is a
 system field: it cannot be deleted, so anything counting on a record having a
 name can go on doing so.
 
+A free-text Name is **required**, since nothing else will supply one. An auto
+number is not: the platform fills it in, so requiring it would describe the
+caller's duty rather than the field's. Two things follow from a required Name:
+
+- A rule granting **create** on such a table must also grant Name as
+  **editable**, or nobody holding that rule can create a record. The error says
+  so rather than leaving you to work it out.
+- Records that predate the requirement keep their empty name until something
+  writes one. An update only checks the fields it is actually setting, so
+  editing such a record's other fields is fine -- though the edit form will ask
+  for a name, since Name is writable and required.
+
 There is still no `Owner` or `CreatedBy`. Beyond Name, every record carries the
 three columns on the `record` row itself -- `id`, `createdAt` and `updatedAt`.
 Those are always returned and always visible, but they are not `field` rows, so
@@ -233,7 +245,7 @@ and none of them owns anything.
 npm test
 ```
 
-75 tests over the adapter, the clause-logic parser, the security layer
+78 tests over the adapter, the clause-logic parser, the security layer
 (hierarchy inheritance, record filtering, per-field grants and the ceiling over
 them, namespace gating, metadata protection), lookups, the rename migration,
 and the HTTP surface end to end.

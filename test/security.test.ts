@@ -101,7 +101,11 @@ async function invoiceTable(app: Application, admin: SecurityContext) {
     name: 'secret',
     type: FieldType.Text,
   });
-  return { std, table, amount, owner, secret };
+  const nameField = (await app.security.listAllFields(admin, table.id)).find(
+    (field) => field.name === 'name',
+  );
+  assert.ok(nameField);
+  return { std, table, amount, owner, secret, nameField };
 }
 
 test('the Administrator role reads and writes without any rules', async () => {
@@ -109,6 +113,7 @@ test('the Administrator role reads and writes without any rules', async () => {
   const { table } = await invoiceTable(app, admin);
 
   const created = await app.records.create(admin, table.id, {
+    name: 'Rec 1',
     amount: 100,
     owner: 'root',
     secret: 'hidden',
@@ -130,7 +135,7 @@ test('the Administrator role reads and writes without any rules', async () => {
 test('a role with no rules sees nothing', async () => {
   const { app, admin } = await installed();
   const { table } = await invoiceTable(app, admin);
-  await app.records.create(admin, table.id, { amount: 10, owner: 'root', secret: 's' });
+  await app.records.create(admin, table.id, { name: 'Rec 2', amount: 10, owner: 'root', secret: 's' });
 
   const role = await app.metadata.createSecurityRole(admin, {
     name: 'Empty',
@@ -178,16 +183,19 @@ test('rules gate records by clause and fields by grant', async () => {
   });
 
   const mine = await app.records.create(admin, table.id, {
+    name: 'Rec 3',
     amount: 100,
     owner: 'sally',
     secret: 'hidden',
   });
   const tooSmall = await app.records.create(admin, table.id, {
+    name: 'Rec 4',
     amount: 10,
     owner: 'sally',
     secret: 'hidden',
   });
   const someoneElse = await app.records.create(admin, table.id, {
+    name: 'Rec 5',
     amount: 900,
     owner: 'root',
     secret: 'hidden',
@@ -243,12 +251,12 @@ test('creating is a table-level grant, separate from edit', async () => {
 
   assert.equal(await app.security.canCreate(eddie, table.id), false);
   await assert.rejects(
-    () => app.records.create(eddie, table.id, { amount: 5, owner: 'eddie' }),
+    () => app.records.create(eddie, table.id, { name: 'Rec 6', amount: 5, owner: 'eddie' }),
     AccessDeniedError,
   );
 
   // Editing an existing record it does cover still works.
-  const existing = await app.records.create(admin, table.id, { amount: 5, owner: 'eddie' });
+  const existing = await app.records.create(admin, table.id, { name: 'Rec 7', amount: 5, owner: 'eddie' });
   const updated = await app.records.update(eddie, existing.id, { amount: 42 });
   assert.equal(updated.values['amount'], 42);
   await assert.rejects(
@@ -262,7 +270,7 @@ test('creating is a table-level grant, separate from edit', async () => {
 
 test('a create grant ignores the clauses but still bounds the fields', async () => {
   const { app, admin } = await installed();
-  const { table, amount, owner, secret } = await invoiceTable(app, admin);
+  const { table, amount, owner, secret, nameField } = await invoiceTable(app, admin);
 
   const role = await app.metadata.createSecurityRole(admin, {
     name: 'Creators',
@@ -276,7 +284,12 @@ test('a create grant ignores the clauses but still bounds the fields', async () 
     accessTypes: [AccessType.Read],
     canCreate: true,
     clauses: [{ fieldId: owner.id, operator: ClauseOperator.Equals, targetValue: '$user.username' }],
-    fieldGrants: [{ fieldId: amount.id, access: FieldAccess.Edit }, { fieldId: owner.id, access: FieldAccess.Edit }],
+    fieldGrants: [
+      { fieldId: amount.id, access: FieldAccess.Edit },
+      { fieldId: owner.id, access: FieldAccess.Edit },
+      // Name is required, so a role that may create has to be able to set it.
+      { fieldId: nameField.id, access: FieldAccess.Edit },
+    ],
   });
   await app.metadata.assignRuleToRole(admin, role.id, rule.id);
   await app.metadata.createUser(admin, {
@@ -290,20 +303,20 @@ test('a create grant ignores the clauses but still bounds the fields', async () 
   assert.equal(await app.security.canCreate(carla, table.id), true);
   assert.deepEqual(
     (await app.security.listCreatableFields(carla, table.id)).map((field) => field.name).sort(),
-    ['amount', 'owner'],
+    ['amount', 'name', 'owner'],
   );
 
   // A record the rule's clause does not cover can still be created...
-  const invisible = await app.records.create(carla, table.id, { amount: 1, owner: 'someone-else' });
+  const invisible = await app.records.create(carla, table.id, { name: 'Rec 8', amount: 1, owner: 'someone-else' });
   // ...it just cannot be read back afterwards.
   await assert.rejects(() => app.records.get(carla, invisible.id), NotFoundError);
 
-  const mine = await app.records.create(carla, table.id, { amount: 2, owner: 'carla' });
+  const mine = await app.records.create(carla, table.id, { name: 'Rec 9', amount: 2, owner: 'carla' });
   assert.equal((await app.records.get(carla, mine.id)).values['amount'], 2);
 
   // Fields the rule does not name are still refused on create.
   await assert.rejects(
-    () => app.records.create(carla, table.id, { amount: 3, owner: 'carla', secret: 'x' }),
+    () => app.records.create(carla, table.id, { name: 'Rec 10', amount: 3, owner: 'carla', secret: 'x' }),
     AccessDeniedError,
   );
 
@@ -369,7 +382,7 @@ test('a role encompasses the access of the roles beneath it', async () => {
       securityRoleId: roleId,
     });
   }
-  await app.records.create(admin, table.id, { amount: 7, owner: 'root', secret: 's' });
+  await app.records.create(admin, table.id, { name: 'Rec 11', amount: 7, owner: 'root', secret: 's' });
 
   const ricky = await app.auth.authenticate('ricky', 'password123');
   const mandy = await app.auth.authenticate('mandy', 'password123');
@@ -406,7 +419,7 @@ test('namespace access gates tables outside std', async () => {
     name: 'title',
     type: FieldType.Text,
   });
-  await app.records.create(admin, table.id, { title: 'thing' });
+  await app.records.create(admin, table.id, { name: 'Rec 12', title: 'thing' });
 
   const role = await app.metadata.createSecurityRole(admin, {
     name: 'Outsiders',
@@ -467,10 +480,10 @@ test('custom clause logic decides which records a rule covers', async () => {
     securityRoleId: role.id,
   });
 
-  const own = await app.records.create(admin, table.id, { amount: 1, owner: 'annie' });
-  const big = await app.records.create(admin, table.id, { amount: 900, owner: 'root' });
-  await app.records.create(admin, table.id, { amount: 9000, owner: 'root' });
-  await app.records.create(admin, table.id, { amount: 3, owner: 'root' });
+  const own = await app.records.create(admin, table.id, { name: 'Rec 13', amount: 1, owner: 'annie' });
+  const big = await app.records.create(admin, table.id, { name: 'Rec 14', amount: 900, owner: 'root' });
+  await app.records.create(admin, table.id, { name: 'Rec 15', amount: 9000, owner: 'root' });
+  await app.records.create(admin, table.id, { name: 'Rec 16', amount: 3, owner: 'root' });
 
   const annie = await app.auth.authenticate('annie', 'password123');
   const visible = (await app.records.list(annie, table.id)).map((record) => record.id).sort();
@@ -521,10 +534,10 @@ test('clauses can compare two fields of the same record', async () => {
     securityRoleId: role.id,
   });
 
-  const over = await app.records.create(admin, table.id, { amount: 100, limitAmount: 50 });
-  await app.records.create(admin, table.id, { amount: 10, limitAmount: 50 });
+  const over = await app.records.create(admin, table.id, { name: 'Rec 17', amount: 100, limitAmount: 50 });
+  await app.records.create(admin, table.id, { name: 'Rec 18', amount: 10, limitAmount: 50 });
   // A null on either side is not "greater than"; the clause fails closed.
-  await app.records.create(admin, table.id, { amount: 999 });
+  await app.records.create(admin, table.id, { name: 'Rec 19', amount: 999 });
 
   const auditor = await app.auth.authenticate('aud', 'password123');
   assert.deepEqual(
@@ -613,6 +626,7 @@ test('field values are validated and coerced by type', async () => {
   });
 
   const record = await app.records.create(admin, table.id, {
+    name: 'Rec 20',
     amount: '42.5',
     paid: 'yes',
     dueOn: '2026-01-31',
@@ -622,15 +636,15 @@ test('field values are validated and coerced by type', async () => {
   assert.equal(record.values['dueOn'], '2026-01-31');
 
   await assert.rejects(
-    () => app.records.create(admin, table.id, { amount: 'not a number' }),
+    () => app.records.create(admin, table.id, { name: 'Rec 21', amount: 'not a number' }),
     ValidationError,
   );
   await assert.rejects(
-    () => app.records.create(admin, table.id, { dueOn: '31/01/2026' }),
+    () => app.records.create(admin, table.id, { name: 'Rec 22', dueOn: '31/01/2026' }),
     ValidationError,
   );
   await assert.rejects(
-    () => app.records.create(admin, table.id, { nosuchfield: 1 }),
+    () => app.records.create(admin, table.id, { name: 'Rec 23', nosuchfield: 1 }),
     ValidationError,
   );
   await app.stop();
@@ -647,17 +661,17 @@ test('reference fields must point at a record of the referenced table', async ()
     referenceTableId: table.id,
   });
 
-  const invoice = await app.records.create(admin, table.id, { amount: 1 });
-  const line = await app.records.create(admin, lines.id, { invoice: invoice.id });
+  const invoice = await app.records.create(admin, table.id, { name: 'Rec 24', amount: 1 });
+  const line = await app.records.create(admin, lines.id, { name: 'Rec 25', invoice: invoice.id });
   assert.equal(line.values['invoice'], invoice.id);
 
   await assert.rejects(
-    () => app.records.create(admin, lines.id, { invoice: 'not-a-record' }),
+    () => app.records.create(admin, lines.id, { name: 'Rec 26', invoice: 'not-a-record' }),
     ValidationError,
   );
   // Pointing at a record in the wrong table is rejected too.
   await assert.rejects(
-    () => app.records.create(admin, lines.id, { invoice: line.id }),
+    () => app.records.create(admin, lines.id, { name: 'Rec 27', invoice: line.id }),
     ValidationError,
   );
   await assert.rejects(
@@ -683,8 +697,8 @@ test('required fields are enforced on create and on clearing', async () => {
     isRequired: true,
   });
 
-  await assert.rejects(() => app.records.create(admin, table.id, {}), ValidationError);
-  const record = await app.records.create(admin, table.id, { lastName: 'Ada' });
+  await assert.rejects(() => app.records.create(admin, table.id, { name: 'Rec 28' }), ValidationError);
+  const record = await app.records.create(admin, table.id, { name: 'Rec 29', lastName: 'Ada' });
   await assert.rejects(
     () => app.records.update(admin, record.id, { lastName: '' }),
     ValidationError,
@@ -695,7 +709,7 @@ test('required fields are enforced on create and on clearing', async () => {
 test('deleting a record removes its values', async () => {
   const { app, admin } = await installed();
   const { table } = await invoiceTable(app, admin);
-  const record = await app.records.create(admin, table.id, { amount: 1, owner: 'root' });
+  const record = await app.records.create(admin, table.id, { name: 'Rec 30', amount: 1, owner: 'root' });
   await app.records.delete(admin, record.id);
   assert.equal(await app.database.count('value', { where: [{ column: 'recordId', operator: 'eq', value: record.id }] }), 0);
   await app.stop();
@@ -714,7 +728,7 @@ test('metadata changes take effect for already-authenticated users', async () =>
     password: 'password123',
     securityRoleId: role.id,
   });
-  await app.records.create(admin, table.id, { amount: 5 });
+  await app.records.create(admin, table.id, { name: 'Rec 31', amount: 5 });
 
   const lena = await app.auth.authenticate('lena', 'password123');
   await assert.rejects(() => app.records.list(lena, table.id), AccessDeniedError);
@@ -760,6 +774,7 @@ test('one rule can expose some fields read-only and others editable', async () =
     securityRoleId: role.id,
   });
   const record = await app.records.create(admin, table.id, {
+    name: 'Rec 32',
     amount: 10,
     owner: 'cass',
     secret: 'hidden',
@@ -825,7 +840,7 @@ test('a field cannot be granted as editable by a rule that grants no writing', a
 
 test('a grant defaults to read-only, and read-only fields cannot be set on create', async () => {
   const { app, admin } = await installed();
-  const { table, amount, owner } = await invoiceTable(app, admin);
+  const { table, amount, owner, nameField } = await invoiceTable(app, admin);
 
   const role = await app.metadata.createSecurityRole(admin, {
     name: 'Submitters',
@@ -838,6 +853,7 @@ test('a grant defaults to read-only, and read-only fields cannot be set on creat
     canCreate: true,
     fieldGrants: [
       { fieldId: amount.id, access: FieldAccess.Edit },
+      { fieldId: nameField.id, access: FieldAccess.Edit },
       // No access given, so this is read-only: visible, never written.
       { fieldId: owner.id },
     ],
@@ -852,17 +868,18 @@ test('a grant defaults to read-only, and read-only fields cannot be set on creat
   const sub = await app.auth.authenticate('sub', 'password123');
 
   assert.deepEqual(
-    (await app.security.listCreatableFields(sub, table.id)).map((field) => field.name),
-    ['amount'],
+    (await app.security.listCreatableFields(sub, table.id)).map((field) => field.name).sort(),
+    ['amount', 'name'],
   );
+  // `owner` is granted read-only, so setting it on create is refused.
   await assert.rejects(
-    () => app.records.create(sub, table.id, { amount: 1, owner: 'sub' }),
+    () => app.records.create(sub, table.id, { name: 'INV-1', amount: 1, owner: 'sub' }),
     AccessDeniedError,
   );
 
-  const record = await app.records.create(sub, table.id, { amount: 1 });
+  const record = await app.records.create(sub, table.id, { name: 'INV-1', amount: 1 });
   // Readable afterwards at both grant levels.
-  assert.deepEqual(Object.keys(record.values).sort(), ['amount', 'owner']);
+  assert.deepEqual(Object.keys(record.values).sort(), ['amount', 'name', 'owner']);
   await app.stop();
 });
 
@@ -968,7 +985,7 @@ test('delete access alone does not make a field writable', async () => {
     password: 'password123',
     securityRoleId: role.id,
   });
-  const record = await app.records.create(admin, table.id, { amount: 1, owner: 'root' });
+  const record = await app.records.create(admin, table.id, { name: 'Rec 35', amount: 1, owner: 'root' });
   const purger = await app.auth.authenticate('purge', 'password123');
 
   assert.deepEqual(await app.security.listEditableFields(purger, table.id), []);

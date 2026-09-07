@@ -257,6 +257,14 @@ an auto number. Being a real field rather than a special case means it is
 granted, filtered and compared like any other -- the only thing special about
 it is that `deleteField` refuses to remove it.
 
+A text Name is `isRequired`; an auto number is not, since the platform supplies
+it. Required plus field-level security has a consequence worth stating: a role
+that may create records on such a table must be granted Name as editable, or it
+can never satisfy the requirement. `assertRequiredPresent` detects exactly that
+case -- required, absent, and not writable by this caller -- and says so, since
+"name is required" on its own sends an administrator looking at the wrong
+thing.
+
 `record` still carries `id`, `createdAt` and `updatedAt` as columns that
 `project()` always includes. Those are not `field` rows: they have no grant and
 `SecurityRuleClause.fieldId` cannot point at them.
@@ -284,6 +292,27 @@ adding audit fields later would reuse all three:
 incremented, inside the transaction that inserts the record. Two processes
 writing the same table would need that read-and-increment to be atomic in the
 database rather than in the adapter; today's single process does not.
+
+## Permission before validation
+
+`createRecord` and `updateRecord` both settle permission first and validate the
+input afterwards. The order matters for what a refusal reveals.
+
+Validating first would answer a caller with no create access with `Field "name"
+is required` -- which is the wrong answer to their question, and describes a
+table they were never allowed to see. Worse, as required fields accumulate the
+message becomes a readable sketch of a table's shape, handed to exactly the
+people who cannot read it.
+
+So the sequence in both is: resolve permissions, decide whether the operation
+is allowed at all, work out the writable field set, and only then normalise,
+check field-level permission, check required fields, and resolve lookups. A
+caller who may not act gets one answer -- denied, or not found -- and learns
+nothing else.
+
+Update checks required-ness only over the fields in the patch. A required field
+the caller is not touching keeps whatever it has, which is what lets records
+written before a field became required go on being edited.
 
 ## Deleting a field
 

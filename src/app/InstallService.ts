@@ -105,6 +105,10 @@ export class InstallService {
    * now, as free text -- an auto number would have to invent values for
    * records that already exist.
    *
+   * It is required, as a free-text name is anywhere else. Records that predate
+   * it keep their empty name until something writes one: an update only checks
+   * the fields it is actually setting.
+   *
    * A table that already has a field called `name` is left alone: it is doing
    * the job, and renaming someone's field out from under them would be worse
    * than not marking it as a system field.
@@ -121,7 +125,7 @@ export class InstallService {
           name: NAME_FIELD,
           label: 'Name',
           type: FieldType.Text,
-          isRequired: false,
+          isRequired: true,
           referenceTableId: null,
           isSystem: true,
           autoNumberNext: 1,

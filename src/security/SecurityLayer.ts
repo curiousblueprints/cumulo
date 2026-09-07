@@ -216,15 +216,9 @@ export class SecurityLayer {
     const fields = await this.fieldMap(table.id);
     const byName = nameIndex(fields);
 
-    const stored = this.normalizeInput(input, byName);
-    for (const field of fields.values()) {
-      if (isSystemAssigned(field)) continue;
-      if (field.isRequired && (stored.get(field.id) ?? null) === null) {
-        throw new ValidationError(`Field "${field.name}" is required`);
-      }
-    }
-    await this.assertLookupsResolve(stored, fields, null);
-
+    // Permission first, then validation. Answering "that field is required"
+    // to someone who may not create here would both tell them the wrong thing
+    // and describe a table they cannot see.
     let writable: ReadonlySet<Id> | null = null;
     if (!permissions.isAdministrator) {
       const granting = rulesGrantingCreate(permissions, table.id);
@@ -234,6 +228,10 @@ export class SecurityLayer {
       // Only fields the rule grants as editable may be set on the way in; a
       // read-only grant makes the field visible, not writable.
       writable = grantedFieldIds(granting, FieldAccess.Edit);
+    }
+
+    const stored = this.normalizeInput(input, byName);
+    if (writable) {
       for (const [fieldId, value] of stored) {
         if (value !== null && !writable.has(fieldId)) {
           throw new AccessDeniedError(
@@ -242,6 +240,8 @@ export class SecurityLayer {
         }
       }
     }
+    this.assertRequiredPresent(fields.values(), stored, writable);
+    await this.assertLookupsResolve(stored, fields, null);
 
     const timestamp = nowIso();
     const record: RecordRow = {
@@ -287,9 +287,8 @@ export class SecurityLayer {
     const byName = nameIndex(fields);
     const current = (await this.valuesByRecord([record.id])).get(record.id) ?? new Map();
 
-    const patch = this.normalizeInput(input, byName);
-    await this.assertLookupsResolve(patch, fields, record.id);
-
+    // Permission first here too, so a record the caller cannot edit reports as
+    // missing rather than commenting on the values they sent.
     let writable: ReadonlySet<Id> | null = null;
     if (!permissions.isAdministrator) {
       const matching = rulesGranting(permissions, table.id, AccessType.Edit).filter((rule) =>
@@ -297,6 +296,10 @@ export class SecurityLayer {
       );
       if (matching.length === 0) throw new NotFoundError(`No such record: ${recordId}`);
       writable = grantedFieldIds(matching, FieldAccess.Edit);
+    }
+
+    const patch = this.normalizeInput(input, byName);
+    if (writable) {
       for (const fieldId of patch.keys()) {
         if (!writable.has(fieldId)) {
           throw new AccessDeniedError(
@@ -305,13 +308,17 @@ export class SecurityLayer {
         }
       }
     }
-
-    for (const [fieldId, value] of patch) {
-      const field = fields.get(fieldId);
-      if (field?.isRequired && value === null) {
-        throw new ValidationError(`Field "${field.name}" is required`);
-      }
-    }
+    // Only what is being written is checked: a required field left alone stays
+    // as it is, which is what lets records predating the rule be edited.
+    this.assertRequiredPresent(
+      [...patch.keys()].flatMap((fieldId) => {
+        const field = fields.get(fieldId);
+        return field ? [field] : [];
+      }),
+      patch,
+      writable,
+    );
+    await this.assertLookupsResolve(patch, fields, record.id);
 
     const updatedAt = nowIso();
     await this.store.transaction(async () => {
@@ -443,6 +450,31 @@ export class SecurityLayer {
       grouped.get(value.recordId)?.set(value.fieldId, value.value);
     }
     return grouped;
+  }
+
+  /**
+   * Every required field among `candidates` has a value in `values`.
+   *
+   * When the caller could not have supplied one -- the field is required but
+   * not writable by them -- the message says so, since "it is required" on its
+   * own sends an administrator looking in the wrong place.
+   */
+  private assertRequiredPresent(
+    candidates: Iterable<FieldDef>,
+    values: Map<Id, string | null>,
+    writable: ReadonlySet<Id> | null,
+  ): void {
+    for (const field of candidates) {
+      if (isSystemAssigned(field)) continue;
+      if (!field.isRequired) continue;
+      if ((values.get(field.id) ?? null) !== null) continue;
+      if (writable && !writable.has(field.id)) {
+        throw new ValidationError(
+          `Field "${field.name}" is required, but this role has no permission to set it`,
+        );
+      }
+      throw new ValidationError(`Field "${field.name}" is required`);
+    }
   }
 
   private normalizeInput(

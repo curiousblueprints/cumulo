@@ -143,6 +143,7 @@ test('an administrator can build a table and a record through the UI', async () 
   assert.match(newRecordPage, /Amount/);
   const created = await client.post(`/tables/${tableId}/records`, {
     _csrf: csrf(newRecordPage),
+    field_name: 'INV-1',
     field_amount: '125',
   });
   assert.match(created.headers.get('location') ?? '', /^\/records\//);
@@ -341,6 +342,7 @@ test('a lookup field renders as a picker of records the user can see', async () 
 
   const created = await client.post(`/tables/${contact.id}/records`, {
     _csrf: csrf(form),
+    field_name: 'Ada',
     field_account: acme.id,
   });
   const recordPath = (created.headers.get('location') ?? '').split('?')[0] as string;

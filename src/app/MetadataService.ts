@@ -250,7 +250,12 @@ export class MetadataService {
    *
    * Name is either free text or an auto number, and it is a system field:
    * it cannot be deleted, so anything that refers to a record by name can
-   * count on it existing.
+   * count on it existing. A free-text name is required; an auto number is
+   * assigned, so there is nothing to require.
+   *
+   * A required field has to be writable by anyone who may create a record, so
+   * a rule granting create on a table with a text Name must grant Name as
+   * editable too.
    */
   async createTable(
     context: SecurityContext,
@@ -640,7 +645,10 @@ function buildNameField(table: TableDef, label: string, type: NameFieldType): Fi
     name: NAME_FIELD,
     label,
     type,
-    isRequired: false,
+    // A free-text name has to be given, since nothing else will supply it.
+    // An auto number is filled in by the platform, so requiring it would
+    // describe the caller's duty rather than the field's.
+    isRequired: type === FieldType.Text,
     referenceTableId: null,
     isSystem: true,
     autoNumberNext: 1,

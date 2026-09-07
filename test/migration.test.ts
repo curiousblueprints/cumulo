@@ -62,7 +62,7 @@ test('an installation predating the rename keeps its field grants', async () => 
       password: 'password123',
       securityRoleId: role.id,
     });
-    await app.records.create(admin, table.id, { amount: 10 });
+    await app.records.create(admin, table.id, { name: 'Rec 45', amount: 10 });
     await app.stop();
 
     // 2. Rewind the database to the old shape: the junction under its old

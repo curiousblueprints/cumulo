@@ -45,7 +45,9 @@ test('every table is created with a free-text Name field', async () => {
   assert.equal(name.type, FieldType.Text);
   assert.equal(name.label, 'Name');
   assert.equal(name.isSystem, true);
-  assert.equal(name.isRequired, false);
+  // Free text has to be given: nothing else will supply it.
+  assert.equal(name.isRequired, true);
+  await assert.rejects(() => app.records.create(admin, table.id, {}), ValidationError);
 
   const record = await app.records.create(admin, table.id, { name: 'Acme' });
   assert.equal(record.values[NAME_FIELD], 'Acme');
@@ -192,6 +194,7 @@ test('year, month, day and day of week validate and store as numbers', async () 
   }
 
   const record = await app.records.create(admin, table.id, {
+    name: 'Rec 41',
     year: '2026',
     month: '9',
     day: '31',
@@ -258,9 +261,9 @@ test('months and weekdays compare as numbers, not as text', async () => {
     securityRoleId: role.id,
   });
 
-  const february = await app.records.create(admin, table.id, { month: 2 });
-  const october = await app.records.create(admin, table.id, { month: 10 });
-  const december = await app.records.create(admin, table.id, { month: 12 });
+  const february = await app.records.create(admin, table.id, { name: 'Rec 42', month: 2 });
+  const october = await app.records.create(admin, table.id, { name: 'Rec 43', month: 10 });
+  const december = await app.records.create(admin, table.id, { name: 'Rec 44', month: 12 });
 
   const viewer = await app.auth.authenticate('quarterly', 'password123');
   const visible = (await app.records.list(viewer, table.id)).map((record) => record.id).sort();
@@ -402,5 +405,97 @@ test('only an administrator may delete a field', async () => {
   });
   const plain = await app.auth.authenticate('plain', 'password123');
   await assert.rejects(() => app.metadata.deleteField(plain, amount.id), AccessDeniedError);
+  await app.stop();
+});
+
+test('a required field must be writable by whoever creates the record', async () => {
+  const { app, admin, std } = await installed();
+  const table = await app.metadata.createTable(admin, { namespaceId: std, name: 'Invoice' });
+  const amount = await app.metadata.createField(admin, {
+    tableId: table.id,
+    name: 'amount',
+    type: FieldType.Number,
+  });
+  const name = named(await app.security.listAllFields(admin, table.id), NAME_FIELD);
+
+  const role = await app.metadata.createSecurityRole(admin, {
+    name: 'Submitters',
+    parentId: admin.role.id,
+  });
+  // The rule permits creating but never grants Name as editable, so nobody
+  // holding it can supply the one field the table insists on.
+  const rule = await app.metadata.createSecurityRule(admin, {
+    name: 'Create invoices',
+    tableId: table.id,
+    accessTypes: [AccessType.Read],
+    canCreate: true,
+    fieldGrants: [
+      { fieldId: amount.id, access: FieldAccess.Edit },
+      { fieldId: name.id, access: FieldAccess.Read },
+    ],
+  });
+  await app.metadata.assignRuleToRole(admin, role.id, rule.id);
+  await app.metadata.createUser(admin, {
+    username: 'submitter',
+    email: 's@example.com',
+    password: 'password123',
+    securityRoleId: role.id,
+  });
+  const submitter = await app.auth.authenticate('submitter', 'password123');
+
+  // The message says why, rather than leaving an administrator to guess that
+  // "required" means "and you were never allowed to set it".
+  await assert.rejects(
+    () => app.records.create(submitter, table.id, { amount: 1 }),
+    (error: unknown) =>
+      error instanceof ValidationError && /no permission to set it/.test(error.message),
+  );
+  await app.stop();
+});
+
+test('creating is refused before the values are looked at', async () => {
+  const { app, admin, std } = await installed();
+  const table = await app.metadata.createTable(admin, { namespaceId: std, name: 'Invoice' });
+  const role = await app.metadata.createSecurityRole(admin, {
+    name: 'Outsiders',
+    parentId: admin.role.id,
+  });
+  await app.metadata.createUser(admin, {
+    username: 'outsider',
+    email: 'o@example.com',
+    password: 'password123',
+    securityRoleId: role.id,
+  });
+  const outsider = await app.auth.authenticate('outsider', 'password123');
+
+  // Sending nothing at all: the answer is that they may not create here, not
+  // a remark about which fields this table happens to require.
+  await assert.rejects(
+    () => app.records.create(outsider, table.id, {}),
+    AccessDeniedError,
+  );
+  await app.stop();
+});
+
+test('a required field left alone is not re-checked on update', async () => {
+  const { app, admin, std } = await installed();
+  const table = await app.metadata.createTable(admin, { namespaceId: std, name: 'Invoice' });
+  await app.metadata.createField(admin, {
+    tableId: table.id,
+    name: 'amount',
+    type: FieldType.Number,
+  });
+  const record = await app.records.create(admin, table.id, { name: 'INV-1', amount: 1 });
+
+  // Editing something else does not require restating the name...
+  const updated = await app.records.update(admin, record.id, { amount: 2 });
+  assert.equal(updated.values['amount'], 2);
+  assert.equal(updated.values[NAME_FIELD], 'INV-1');
+
+  // ...but clearing it is still refused.
+  await assert.rejects(
+    () => app.records.update(admin, record.id, { name: '' }),
+    ValidationError,
+  );
   await app.stop();
 });
