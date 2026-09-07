@@ -47,6 +47,15 @@ test('an installation predating the rename keeps its field grants', async () => 
       fieldGrants: [{ fieldId: amount.id, access: FieldAccess.Edit }],
     });
     await app.metadata.assignRuleToRole(admin, role.id, rule.id);
+    // A second rule that grants only reading. Its grant must not come back
+    // editable, or the migration would hand it access the rule never had.
+    const readOnly = await app.metadata.createSecurityRule(admin, {
+      name: 'Glance at invoices',
+      tableId: table.id,
+      accessTypes: [AccessType.Read],
+      fieldGrants: [{ fieldId: amount.id, access: FieldAccess.Read }],
+    });
+    await app.metadata.assignRuleToRole(admin, role.id, readOnly.id);
     await app.metadata.createUser(admin, {
       username: 'sally',
       email: 's@e.com',
@@ -69,19 +78,23 @@ test('an installation predating the rename keeps its field grants', async () => 
       SELECT "id", "securityRuleId", "fieldId", "createdAt" FROM "${T.securityRuleFieldGrant}"`);
     raw.exec(`DROP TABLE "${T.securityRuleFieldGrant}"`);
     const legacyRows = raw.prepare(`SELECT * FROM "${LEGACY_SECURITY_RULE_FIELD}"`).all();
-    assert.equal(legacyRows.length, 1);
+    assert.equal(legacyRows.length, 2);
     raw.close();
 
     // 3. Booting the current code carries them forward.
     const migrated = await Application.start({ database: { driver: 'sqlite', file } });
     const grants = await migrated.database.find(T.securityRuleFieldGrant);
-    assert.equal(grants.length, 1);
-    assert.equal(grants[0]?.['id'], legacyRows[0]?.['id']);
-    assert.equal(grants[0]?.['fieldId'], amount.id);
-    assert.equal(grants[0]?.['createdAt'], legacyRows[0]?.['createdAt']);
-    // Old rows granted a field at whatever the rule allowed, so they arrive
-    // editable: the reading that leaves existing behaviour unchanged.
-    assert.equal(grants[0]?.['access'], FieldAccess.Edit);
+    assert.equal(grants.length, 2);
+    for (const grant of grants) {
+      assert.equal(grant['fieldId'], amount.id);
+    }
+    const byRule = new Map(grants.map((grant) => [grant['securityRuleId'], grant]));
+    assert.equal(byRule.get(rule.id)?.['createdAt'], legacyRows[0]?.['createdAt']);
+
+    // The old rows had no level, so each takes the level its own rule
+    // justifies: never more than the rule's own access to the table.
+    assert.equal(byRule.get(rule.id)?.['access'], FieldAccess.Edit);
+    assert.equal(byRule.get(readOnly.id)?.['access'], FieldAccess.Read);
     assert.equal(await migrated.database.hasTable(LEGACY_SECURITY_RULE_FIELD), false);
 
     // The role still works exactly as it did before the rename.
@@ -95,7 +108,7 @@ test('an installation predating the rename keeps its field grants', async () => 
 
     // 4. Booting again over the migrated database is a no-op.
     const again = await Application.start({ database: { driver: 'sqlite', file } });
-    assert.equal((await again.database.find(T.securityRuleFieldGrant)).length, 1);
+    assert.equal((await again.database.find(T.securityRuleFieldGrant)).length, 2);
     await again.stop();
   } finally {
     rmSync(directory, { recursive: true, force: true });

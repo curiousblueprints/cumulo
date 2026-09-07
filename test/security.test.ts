@@ -883,3 +883,106 @@ test('the widest grant wins when a field is named twice', async () => {
   assert.deepEqual(grants, [{ field: 'amount', access: FieldAccess.Edit }]);
   await app.stop();
 });
+
+test('a field grant can never exceed its rule access to the table', async () => {
+  const { app, admin } = await installed();
+  const { table, amount } = await invoiceTable(app, admin);
+
+  // The rule says what may be done to records of its table; the grant says
+  // what may be done to a field of it. The only thing tying them together is
+  // that the field cannot reach further than the table does.
+  const combinations: { accessTypes: AccessType[]; canCreate: boolean }[] = [];
+  for (const read of [false, true]) {
+    for (const edit of [false, true]) {
+      for (const remove of [false, true]) {
+        for (const canCreate of [false, true]) {
+          const accessTypes: AccessType[] = [];
+          if (read) accessTypes.push(AccessType.Read);
+          if (edit) accessTypes.push(AccessType.Edit);
+          if (remove) accessTypes.push(AccessType.Delete);
+          if (accessTypes.length === 0 && !canCreate) continue;
+          combinations.push({ accessTypes, canCreate });
+        }
+      }
+    }
+  }
+  assert.equal(combinations.length, 15);
+
+  let index = 0;
+  for (const combination of combinations) {
+    const writes =
+      combination.canCreate || combination.accessTypes.includes(AccessType.Edit);
+
+    // A read-only grant is always fine: it never exceeds anything.
+    await app.metadata.createSecurityRule(admin, {
+      ...combination,
+      name: `read grant ${index}`,
+      tableId: table.id,
+      fieldGrants: [{ fieldId: amount.id, access: FieldAccess.Read }],
+    });
+
+    const editable = app.metadata.createSecurityRule(admin, {
+      ...combination,
+      name: `edit grant ${index}`,
+      tableId: table.id,
+      fieldGrants: [{ fieldId: amount.id, access: FieldAccess.Edit }],
+    });
+    if (writes) {
+      const rule = await editable;
+      assert.equal(rule.canCreate, combination.canCreate);
+    } else {
+      // Read-only or delete-only on the table: an editable field would reach
+      // further than the rule does, so it is refused.
+      await assert.rejects(
+        () => editable,
+        ValidationError,
+        `expected refusal for ${JSON.stringify(combination)}`,
+      );
+    }
+    index += 1;
+  }
+  await app.stop();
+});
+
+test('delete access alone does not make a field writable', async () => {
+  const { app, admin } = await installed();
+  const { table, amount, owner } = await invoiceTable(app, admin);
+
+  const role = await app.metadata.createSecurityRole(admin, {
+    name: 'Purgers',
+    parentId: admin.role.id,
+  });
+  const rule = await app.metadata.createSecurityRule(admin, {
+    name: 'Read and delete',
+    tableId: table.id,
+    accessTypes: [AccessType.Read, AccessType.Delete],
+    fieldGrants: [
+      { fieldId: amount.id, access: FieldAccess.Read },
+      { fieldId: owner.id, access: FieldAccess.Read },
+    ],
+  });
+  await app.metadata.assignRuleToRole(admin, role.id, rule.id);
+  await app.metadata.createUser(admin, {
+    username: 'purge',
+    email: 'p@example.com',
+    password: 'password123',
+    securityRoleId: role.id,
+  });
+  const record = await app.records.create(admin, table.id, { amount: 1, owner: 'root' });
+  const purger = await app.auth.authenticate('purge', 'password123');
+
+  assert.deepEqual(await app.security.listEditableFields(purger, table.id), []);
+  assert.equal(await app.security.canCreate(purger, table.id), false);
+  // No rule grants edit on this table at all, so the record is not editable
+  // and reports as missing -- the same answer as for a record outside your
+  // rules. "Forbidden" is reserved for a field you may not touch on a record
+  // you may otherwise edit.
+  await assert.rejects(
+    () => app.records.update(purger, record.id, { amount: 2 }),
+    NotFoundError,
+  );
+  // Deleting the whole record is a different question, and this role may.
+  await app.records.delete(purger, record.id);
+  assert.equal((await app.records.list(admin, table.id)).length, 0);
+  await app.stop();
+});

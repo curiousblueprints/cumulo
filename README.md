@@ -125,21 +125,25 @@ tables be defined at runtime.
 4. **Then rules, per record.** A rule grants read/edit/delete on one table to
    the records satisfying its clauses (`all`, `any`, or custom logic such as
    `1 AND (2 OR 3)`).
-5. **Then fields, one grant at a time.** Each `securityRuleFieldGrant` names a
-   field and says how far the rule's reach on it goes: **read-only** or
-   **editable**. A record's visible fields are every field granted at either
-   level by the rules that matched it; its writable fields are only those
-   granted as editable. A field no rule grants does not appear at all.
+5. **Then fields, separately.** A `securityRuleFieldGrant` says whether a rule
+   exposes one field as **read-only** or as **editable**. This is set per field
+   and is independent of what the rule allows on records: a rule granting read
+   and edit can expose ten fields read-only and one editable. A record's
+   visible fields are everything granted at either level by the rules that
+   matched it; its writable fields are only those granted editable. A field no
+   rule grants does not appear at all.
 
-   So a rule that grants read and edit on its records can still expose most of
-   its fields read-only and only a few as editable -- field security is set per
-   field, not inherited from the widest thing the rule allows. A grant with no
-   level stated is read-only, and a field can only be granted as editable by a
-   rule that grants edit or create.
+   The one constraint: **a field grant may not exceed its rule's access to the
+   table.** Marking a field editable needs a rule that permits writing -- edit
+   or create -- so a read-only rule can never make a field writable. That is
+   checked when the rule is saved.
+
 6. **Creating is separate, and table-level.** A rule's `canCreate` says whether
    it permits inserting into its table. The clauses play no part -- there is no
-   record yet for them to describe -- but the rule's fields still bound what a
-   creator may set. So "may create, may only read back their own" is one rule.
+   record yet for them to describe -- but the rule's editable field grants
+   still bound what a creator may set. So "may create, may only read back their
+   own" is one rule.
+
 7. **Default deny.** A role with no rules sees nothing.
 
 A record outside your rules reports as *not found*, not *forbidden*, so record
@@ -175,10 +179,10 @@ and none of them owns anything.
 npm test
 ```
 
-57 tests over the adapter, the clause-logic parser, the security layer
-(hierarchy inheritance, record filtering, per-field grants, namespace gating,
-metadata protection), lookups, the rename migration, and the HTTP surface end
-to end.
+59 tests over the adapter, the clause-logic parser, the security layer
+(hierarchy inheritance, record filtering, per-field grants and the ceiling over
+them, namespace gating, metadata protection), lookups, the rename migration,
+and the HTTP surface end to end.
 
 ## Assumptions and decisions
 
@@ -204,6 +208,6 @@ Recorded so they are easy to overturn:
   described as `table`/`field` rows, so only Administrator can change it.
 - `applySchema` adds columns an existing database is missing, which is enough
   for additive changes. The one rename so far (`securityRuleField` ->
-  `securityRuleFieldGrant`) is carried forward explicitly at install time, and
-  those older grants arrive editable so behaviour is unchanged.
+  `securityRuleFieldGrant`) is carried forward explicitly at install time, each
+  old grant taking the level its own rule justifies.
 - Sessions are in-memory, so restarting the server signs everyone out.

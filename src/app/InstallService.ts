@@ -1,6 +1,7 @@
 import { LEGACY_SECURITY_RULE_FIELD, PLATFORM_SCHEMA, T } from '../db/schema.js';
 import type { DatabaseAdapter } from '../db/types.js';
 import {
+  AccessType,
   ADMINISTRATOR_ROLE,
   FieldAccess,
   STD_NAMESPACE,
@@ -65,30 +66,50 @@ export class InstallService {
 
   /**
    * `securityRuleField` became `securityRuleFieldGrant`, which carries an
-   * access level per field. Rows written under the old name granted a field at
-   * whatever the rule allowed, so they come across as editable -- the reading
-   * that leaves behaviour unchanged. New grants default to read-only instead.
+   * access level per field.
+   *
+   * The old rows had no level: a granted field was writable exactly when its
+   * rule allowed writing. So each row comes across at the level its own rule
+   * justifies -- editable where the rule grants edit or create, read-only
+   * otherwise. That preserves the behaviour these installations already had
+   * and keeps the invariant true in the data: a field grant never exceeds its
+   * rule's access to the table.
    *
    * `applySchema` only ever adds, so a rename needs this explicit step.
    */
   private async carryForwardFieldGrants(): Promise<void> {
     if (!(await this.db.hasTable(LEGACY_SECURITY_RULE_FIELD))) return;
     await this.db.transaction(async () => {
-      const legacy = await this.db.find(LEGACY_SECURITY_RULE_FIELD);
-      const existing = await this.db.count(T.securityRuleFieldGrant);
-      if (existing === 0) {
-        for (const row of legacy) {
+      if ((await this.db.count(T.securityRuleFieldGrant)) === 0) {
+        const writesFor = await this.rulesThatAllowWriting();
+        for (const row of await this.db.find(LEGACY_SECURITY_RULE_FIELD)) {
+          const securityRuleId = String(row['securityRuleId'] ?? '');
           await this.db.insert(T.securityRuleFieldGrant, {
             id: row['id'] ?? newId(),
-            securityRuleId: row['securityRuleId'] ?? '',
+            securityRuleId,
             fieldId: row['fieldId'] ?? '',
-            access: FieldAccess.Edit,
+            access: writesFor.has(securityRuleId) ? FieldAccess.Edit : FieldAccess.Read,
             createdAt: row['createdAt'] ?? nowIso(),
           });
         }
       }
       await this.db.dropTable(LEGACY_SECURITY_RULE_FIELD);
     });
+  }
+
+  /** Ids of the rules that permit writing at all, by edit or by create. */
+  private async rulesThatAllowWriting(): Promise<Set<string>> {
+    const writing = new Set<string>();
+    for (const rule of await this.db.find(T.securityRule)) {
+      const accessTypes = String(rule['accessTypes'] ?? '')
+        .split(',')
+        .map((part) => part.trim());
+      const canCreate = rule['canCreate'] === true || rule['canCreate'] === 1;
+      if (canCreate || accessTypes.includes(AccessType.Edit)) {
+        writing.add(String(rule['id'] ?? ''));
+      }
+    }
+    return writing;
   }
 
   /** True once at least one user exists. */

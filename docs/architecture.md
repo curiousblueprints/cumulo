@@ -124,34 +124,57 @@ offers records the user can read. A lookup whose current target the user cannot
 read is kept as a selected option on the edit form, so saving does not silently
 clear it.
 
-## Field grants
+## Two dimensions: the table and its fields
 
-`securityRuleFieldGrant` is a row per (rule, field) with an `access` of `read`
-or `edit`. Edit implies read, so the two questions the layer ever asks are
-answered by one helper:
+A `securityRule` belongs to one table and answers questions about that table:
 
-```ts
-grantedFieldIds(rules, FieldAccess.Read)  // everything those rules expose
-grantedFieldIds(rules, FieldAccess.Edit)  // only what they let you write
+- **Records** -- may this role read, edit or delete records of it? Those are the
+  rule's `accessTypes`, and the clauses narrow *which* records each applies to.
+- **Creating** -- may this role make new records in it? That is `canCreate`,
+  and it is table-wide: there is no record yet for the clauses to describe.
+
+A `securityRuleFieldGrant` belongs to one rule and answers a question about a
+field of that same table: may this role read it, or read and write it?
+
+These are independent. The rule does not dictate the level of its grants, and a
+grant does not widen the rule. A rule granting read and edit on its records may
+expose ten fields read-only and one editable, or every field read-only, or none
+at all. The only thing connecting them is a ceiling:
+
+> **A field grant may not exceed its rule's access to the table.** An editable
+> grant needs a rule that permits writing -- edit or create. A rule that only
+> reads, or only deletes, cannot make any field writable.
+
+That is checked when the rule is authored, so an impossible pairing never
+reaches storage, and it is what the enforcement below relies on.
+
+Nothing here concerns access *to rules*. Rules, roles and the rest of the
+metadata are administrative: only Administrator reads or writes them, and no
+role is ever granted access to them.
+
+### How enforcement uses the two
+
+Each operation picks the rules that permit it, then asks their grants for the
+level it needs. `grantedFieldIds(rules, level)` is the only helper involved;
+edit implies read, so asking for read returns every granted field and asking
+for edit returns the writable subset.
+
+```
+read a record    rules granting read, whose clauses match it   -> read grants
+update a record  rules granting edit, whose clauses match it   -> edit grants
+create a record  rules with canCreate (clauses do not apply)   -> edit grants
+delete a record  rules granting delete, whose clauses match it -> no fields
 ```
 
-Which rules get passed in is what differs by operation:
+Deleting takes a record whole, so no grant is consulted for it.
 
-| Operation | Rules | Level |
-| --- | --- | --- |
-| read a record | rules granting read whose clauses matched it | read |
-| update a record | rules granting edit whose clauses matched it | edit |
-| create a record | rules with `canCreate` (no clauses) | edit |
+Because the ceiling holds, the second column can never over-grant: a rule that
+reaches the "edit grants" column is one that permits writing, so its editable
+grants were legitimate when they were written.
 
-Separating the level from the rule's access types is the whole point: before
-this, a rule granting read and edit granted every field it named at both, so
-"everyone in support can see the account owner but only managers can change it"
-needed two rules with duplicated clauses. Now it is one rule with two grants.
-
-Two guards keep the pairing honest. A field granted as editable by a rule that
-grants neither edit nor create is rejected at authoring time, since nothing
-could ever act on it. And when a rule names the same field twice, the wider
-grant wins, so a duplicate cannot quietly narrow access.
+Two smaller rules keep authoring honest. A grant with no level stated is
+read-only, since writable is the wider claim. And when a rule names the same
+field twice, the wider grant wins, so a duplicate cannot quietly narrow access.
 
 ## Projection
 
@@ -215,10 +238,13 @@ column type has a zero value.
 
 That covers additive change. It cannot cover a rename, so the one rename so far
 is handled explicitly: `InstallService.carryForwardFieldGrants` copies any
-`securityRuleField` rows into `securityRuleFieldGrant` at `access: 'edit'` --
-the level that preserves the old behaviour, where a granted field was writable
-if the rule allowed writing at all -- and then drops the legacy table. It runs
-inside `install()`, so it happens on boot, once, and is a no-op afterwards.
+`securityRuleField` rows into `securityRuleFieldGrant` and drops the legacy
+table. The old rows carried no level -- a granted field was writable exactly
+when its rule allowed writing -- so each row takes the level its own rule
+justifies: editable where the rule grants edit or create, read-only otherwise.
+That both preserves the behaviour those installations had and keeps the ceiling
+true in the data, which stamping every row `edit` would not. It runs inside
+`install()`, so it happens on boot, once, and is a no-op afterwards.
 
 This is the pattern to copy rather than the mechanism to reuse. A third or
 fourth of these wants a real migrations directory and a schema-version row,
