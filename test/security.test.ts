@@ -215,50 +215,123 @@ test('rules gate records by clause and fields by grant', async () => {
   await app.stop();
 });
 
-test('edit access governs both updating and creating', async () => {
+test('creating is a table-level grant, separate from edit', async () => {
   const { app, admin } = await installed();
   const { table, amount, owner, secret } = await invoiceTable(app, admin);
 
-  const role = await app.metadata.createSecurityRole(admin, {
+  // Edit on your own invoices, but no create.
+  const editors = await app.metadata.createSecurityRole(admin, {
     name: 'Editors',
     parentId: admin.role.id,
   });
-  const rule = await app.metadata.createSecurityRule(admin, {
+  const editRule = await app.metadata.createSecurityRule(admin, {
     name: 'Edit own invoices',
     tableId: table.id,
     accessTypes: [AccessType.Read, AccessType.Edit],
     clauses: [{ fieldId: owner.id, operator: ClauseOperator.Equals, targetValue: '$user.username' }],
     fieldIds: [amount.id, owner.id],
   });
-  await app.metadata.assignRuleToRole(admin, role.id, rule.id);
+  await app.metadata.assignRuleToRole(admin, editors.id, editRule.id);
   await app.metadata.createUser(admin, {
     username: 'eddie',
     email: 'e@example.com',
     password: 'password123',
-    securityRoleId: role.id,
+    securityRoleId: editors.id,
   });
   const eddie = await app.auth.authenticate('eddie', 'password123');
 
-  // Creating a record the rule would not cover is refused...
+  assert.equal(await app.security.canCreate(eddie, table.id), false);
   await assert.rejects(
-    () => app.records.create(eddie, table.id, { amount: 5, owner: 'someone-else' }),
-    AccessDeniedError,
-  );
-  // ...as is writing a field the rule does not grant.
-  await assert.rejects(
-    () => app.records.create(eddie, table.id, { amount: 5, owner: 'eddie', secret: 'x' }),
+    () => app.records.create(eddie, table.id, { amount: 5, owner: 'eddie' }),
     AccessDeniedError,
   );
 
-  const created = await app.records.create(eddie, table.id, { amount: 5, owner: 'eddie' });
-  const updated = await app.records.update(eddie, created.id, { amount: 42 });
+  // Editing an existing record it does cover still works.
+  const existing = await app.records.create(admin, table.id, { amount: 5, owner: 'eddie' });
+  const updated = await app.records.update(eddie, existing.id, { amount: 42 });
   assert.equal(updated.values['amount'], 42);
   await assert.rejects(
-    () => app.records.update(eddie, created.id, { secret: 'x' }),
+    () => app.records.update(eddie, existing.id, { secret: 'x' }),
     AccessDeniedError,
   );
-  await assert.rejects(() => app.records.delete(eddie, created.id), NotFoundError);
+  await assert.rejects(() => app.records.delete(eddie, existing.id), NotFoundError);
   void secret;
+  await app.stop();
+});
+
+test('a create grant ignores the clauses but still bounds the fields', async () => {
+  const { app, admin } = await installed();
+  const { table, amount, owner, secret } = await invoiceTable(app, admin);
+
+  const role = await app.metadata.createSecurityRole(admin, {
+    name: 'Creators',
+    parentId: admin.role.id,
+  });
+  // The clause would exclude everything this role creates, and that is fine:
+  // creation is table-level, so the clause only governs reading it back.
+  const rule = await app.metadata.createSecurityRule(admin, {
+    name: 'Create invoices, read own',
+    tableId: table.id,
+    accessTypes: [AccessType.Read],
+    canCreate: true,
+    clauses: [{ fieldId: owner.id, operator: ClauseOperator.Equals, targetValue: '$user.username' }],
+    fieldIds: [amount.id, owner.id],
+  });
+  await app.metadata.assignRuleToRole(admin, role.id, rule.id);
+  await app.metadata.createUser(admin, {
+    username: 'carla',
+    email: 'c@example.com',
+    password: 'password123',
+    securityRoleId: role.id,
+  });
+  const carla = await app.auth.authenticate('carla', 'password123');
+
+  assert.equal(await app.security.canCreate(carla, table.id), true);
+  assert.deepEqual(
+    (await app.security.listCreatableFields(carla, table.id)).map((field) => field.name).sort(),
+    ['amount', 'owner'],
+  );
+
+  // A record the rule's clause does not cover can still be created...
+  const invisible = await app.records.create(carla, table.id, { amount: 1, owner: 'someone-else' });
+  // ...it just cannot be read back afterwards.
+  await assert.rejects(() => app.records.get(carla, invisible.id), NotFoundError);
+
+  const mine = await app.records.create(carla, table.id, { amount: 2, owner: 'carla' });
+  assert.equal((await app.records.get(carla, mine.id)).values['amount'], 2);
+
+  // Fields the rule does not name are still refused on create.
+  await assert.rejects(
+    () => app.records.create(carla, table.id, { amount: 3, owner: 'carla', secret: 'x' }),
+    AccessDeniedError,
+  );
+
+  // Create is not edit: the record it just made is read-only to it.
+  await assert.rejects(() => app.records.update(carla, mine.id, { amount: 9 }), NotFoundError);
+  await app.stop();
+});
+
+test('a rule must grant something', async () => {
+  const { app, admin } = await installed();
+  const { table } = await invoiceTable(app, admin);
+  await assert.rejects(
+    () =>
+      app.metadata.createSecurityRule(admin, {
+        name: 'Grants nothing',
+        tableId: table.id,
+        accessTypes: [],
+      }),
+    ValidationError,
+  );
+  // Create alone is enough.
+  const rule = await app.metadata.createSecurityRule(admin, {
+    name: 'Create only',
+    tableId: table.id,
+    accessTypes: [],
+    canCreate: true,
+  });
+  assert.equal(rule.canCreate, true);
+  assert.deepEqual(rule.accessTypes, []);
   await app.stop();
 });
 

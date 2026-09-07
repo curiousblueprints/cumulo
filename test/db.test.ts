@@ -31,6 +31,45 @@ test('applySchema is idempotent', async () => {
   await db.close();
 });
 
+test('applySchema adds columns an existing table is missing', async () => {
+  const db = await open();
+  await db.insert('widget', { id: 'a', name: 'A', size: 1, active: true });
+
+  const evolved: Schema = [
+    {
+      ...(SCHEMA[0] as Schema[number]),
+      columns: [
+        ...(SCHEMA[0] as Schema[number]).columns,
+        { name: 'colour', type: 'text' },
+        { name: 'shiny', type: 'boolean' },
+        { name: 'weight', type: 'real', nullable: true },
+      ],
+    },
+  ];
+  await db.applySchema(evolved);
+
+  // The existing row survives and takes the type's zero value.
+  const row = await db.findById('widget', 'a');
+  assert.equal(row?.['name'], 'A');
+  assert.equal(row?.['colour'], '');
+  assert.equal(row?.['shiny'], false);
+  assert.equal(row?.['weight'], null);
+
+  await db.insert('widget', {
+    id: 'b',
+    name: 'B',
+    size: 2,
+    active: false,
+    colour: 'red',
+    shiny: true,
+    weight: 1.5,
+  });
+  const added = await db.findById('widget', 'b');
+  assert.equal(added?.['colour'], 'red');
+  assert.equal(added?.['shiny'], true);
+  await db.close();
+});
+
 test('round-trips booleans and nulls', async () => {
   const db = await open();
   await db.insert('widget', { id: 'a', name: 'A', size: 1, active: true, note: null });

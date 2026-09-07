@@ -71,9 +71,11 @@ function normalizeBoolean(raw: string): string {
 /**
  * Evaluate a single clause against one record.
  *
- * Null handling fails closed: a null field value satisfies only `isNull`.
- * That means "field != x" does not match records where the field is empty,
- * which is the conservative reading for an access-control predicate.
+ * Empty values are read literally rather than defensively: an empty field is
+ * simply not equal to "x", so `field != x` matches it. Only `equals`-shaped
+ * questions can be answered about an empty value; the ordering and text
+ * operators have nothing to compare, so they are false. Use `isNull` /
+ * `isNotNull` when emptiness itself is the thing you mean.
  */
 export function evaluateClause(
   clause: SecurityRuleClause,
@@ -82,23 +84,33 @@ export function evaluateClause(
   values: ValueMap,
   user: User,
 ): boolean {
-  const left = values.get(clause.fieldId) ?? null;
+  const left = blankToNull(values.get(clause.fieldId) ?? null);
 
-  if (clause.operator === ClauseOperator.IsNull) return left === null || left === '';
-  if (clause.operator === ClauseOperator.IsNotNull) return left !== null && left !== '';
-  if (left === null) return false;
+  if (clause.operator === ClauseOperator.IsNull) return left === null;
+  if (clause.operator === ClauseOperator.IsNotNull) return left !== null;
 
-  const right = compareField
-    ? (values.get(compareField.id) ?? null)
-    : resolveTarget(clause.targetValue, user);
-  if (right === null) return false;
+  const right = blankToNull(
+    compareField
+      ? (values.get(compareField.id) ?? null)
+      : resolveTarget(clause.targetValue, user),
+  );
 
   const type = field.type;
+
+  // Equality is the one comparison that stays meaningful when a side is empty:
+  // two empty values are equal, and an empty value differs from any other.
+  if (clause.operator === ClauseOperator.Equals) {
+    if (left === null || right === null) return left === right;
+    return equals(type, left, right);
+  }
+  if (clause.operator === ClauseOperator.NotEquals) {
+    if (left === null || right === null) return left !== right;
+    return !equals(type, left, right);
+  }
+
+  if (left === null || right === null) return false;
+
   switch (clause.operator) {
-    case ClauseOperator.Equals:
-      return equals(type, left, right);
-    case ClauseOperator.NotEquals:
-      return !equals(type, left, right);
     case ClauseOperator.GreaterThan:
       return ordered(type, left, right, (a, b) => a > b, (a, b) => a > b);
     case ClauseOperator.GreaterOrEqual:
@@ -121,12 +133,19 @@ export function evaluateClause(
   }
 }
 
+/** An absent value and an empty string mean the same thing: no value. */
+function blankToNull(value: string | null): string | null {
+  return value === null || value === '' ? null : value;
+}
+
 /** A rule with its clauses and accessible fields resolved once, up front. */
 export interface CompiledRule {
   id: Id;
   name: string;
   tableId: Id;
   accessTypes: ReadonlySet<string>;
+  /** Table-level: this rule permits creating records in its table. */
+  canCreate: boolean;
   clauseMatch: ClauseMatch;
   clauseLogic: string | null;
   clauses: SecurityRuleClause[];

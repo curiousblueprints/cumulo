@@ -77,6 +77,7 @@ export class SqliteAdapter implements DatabaseAdapter {
     for (const table of schema) {
       this.rememberTypes(table);
       db.exec(createTableSql(table));
+      this.addMissingColumns(table);
       for (const index of table.indexes ?? []) {
         const name = `idx_${table.name}_${index.join('_')}`;
         db.exec(
@@ -84,6 +85,27 @@ export class SqliteAdapter implements DatabaseAdapter {
             `(${index.map(quote).join(', ')})`,
         );
       }
+    }
+  }
+
+  /**
+   * Bring an existing table up to the current schema by adding columns it does
+   * not have yet. Enough for additive changes, which is what schema evolution
+   * looks like here; anything destructive would need a real migration.
+   */
+  private addMissingColumns(table: TableSchema): void {
+    const existing = new Set(
+      this.all(`PRAGMA table_info(${quote(table.name)})`, []).map((row) => String(row['name'])),
+    );
+    for (const column of table.columns) {
+      if (existing.has(column.name)) continue;
+      // SQLite requires a default when adding a NOT NULL column to a table
+      // that may already hold rows.
+      const fill = column.nullable ? '' : ` NOT NULL DEFAULT ${defaultLiteral(column.type)}`;
+      this.handle().exec(
+        `ALTER TABLE ${quote(table.name)} ADD COLUMN ${quote(column.name)} ` +
+          `${SQL_TYPES[column.type]}${fill}`,
+      );
     }
   }
 
@@ -242,6 +264,17 @@ export class SqliteAdapter implements DatabaseAdapter {
         types.get(column) === 'boolean' && value !== null ? Number(value) !== 0 : value;
     }
     return result;
+  }
+}
+
+function defaultLiteral(type: ColumnDef['type']): string {
+  switch (type) {
+    case 'text':
+      return "''";
+    case 'real':
+      return '0.0';
+    default:
+      return '0';
   }
 }
 

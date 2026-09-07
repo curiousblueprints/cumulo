@@ -45,12 +45,26 @@ other call requires.
 3. **Namespaces** -- `std` plus every `namespaceAccess` row for any role in the
    closure.
 4. **Rules** -- every `securityRule` linked to any role in the closure, each
-   compiled with its clauses and granted field ids, indexed by table.
+   compiled with its clauses, its `canCreate` flag and its granted field ids,
+   indexed by table.
 
 The result is cached per role and dropped wholesale whenever metadata changes,
 since permissions are derived from metadata. `SecurityLayer.asAdministrator`
 invalidates on the way out; that is why a rule assigned to a role takes effect
 for a user who is already signed in.
+
+### Create is not a record-level grant
+
+`AccessType` covers read, edit and delete, and all three are decided per record
+by the rule's clauses. Creation cannot work that way -- there is no record to
+test -- so it is a separate boolean on `securityRule`, checked by
+`rulesGrantingCreate` with no clause evaluation at all. The rule's
+`securityRuleField` grants still apply, and bound what a creator may set.
+
+The consequence is worth stating plainly: a rule can grant creating records its
+own clauses would not then cover, so a user can create a record and immediately
+lose sight of it. That is intended -- "submit a case, see only your own" is one
+rule, not two.
 
 ### Evaluating a rule against a record
 
@@ -73,8 +87,42 @@ correctly as strings. A clause may compare a field to a literal, to a context
 token (`$user.id`, `$user.username`, `$user.securityRoleId`), or to another
 field of the same record.
 
+Empty values are handled naively rather than defensively. An absent `value` row
+and an empty string are the same thing, and only equality stays meaningful
+about one: two empty values are equal, an empty value differs from anything
+else, so `field != x` matches records where the field is empty. Every other
+operator needs two things to compare and is false without them. `isNull` and
+`isNotNull` are how you ask about emptiness on purpose.
+
 Clauses referencing a field that no longer exists evaluate to false rather than
 throwing, so a deleted field narrows access instead of breaking the rule.
+
+## Lookups
+
+`FieldType.Reference` is the only relationship there is. A `value` row holds the
+target record's id, and `field.referenceTableId` says which table that id must
+be in. There is no master-detail, so no field owns another record's lifecycle.
+
+Three things enforce that they behave like relationships rather than loose ids:
+
+- **Resolution** (`assertLookupsResolve`) checks on every write that the target
+  exists and belongs to the looked-up table.
+- **Acyclicity** (`assertNoLookupCycle`) applies when a field's target table is
+  its own table. It walks the chain upward from the proposed target; reaching
+  the record being edited means the write would make it its own ancestor, and
+  is refused. The walk carries a `seen` set, so a cycle that somehow already
+  exists terminates instead of hanging.
+- **Detachment on delete** (`MetadataStore.clearLookupsTo`) removes the `value`
+  rows pointing at a deleted record, inside the same transaction as the delete.
+  Emptying a lookup *is* deleting its value row, so this leaves the referencing
+  records untouched. This is the system acting, not the user: it runs whether
+  or not the caller could see the records being detached, because the
+  alternative is a dangling id.
+
+The UI resolves lookups through the security layer, so a picker only ever
+offers records the user can read. A lookup whose current target the user cannot
+read is kept as a selected option on the edit form, so saving does not silently
+clear it.
 
 ## Projection
 
@@ -124,6 +172,15 @@ The transport already returns `HttpResponse` objects and `json()` sits beside
 The JSON body parser is already in place, including repeated keys, so a
 request body of `{"accessTypes": ["read", "edit"]}` arrives the same shape as
 the equivalent multi-select.
+
+## Schema evolution
+
+`applySchema` creates missing tables and then adds any columns an existing
+table lacks (`addMissingColumns`, via `PRAGMA table_info`). SQLite needs a
+default when adding a NOT NULL column to a table that may hold rows, so each
+column type has a zero value. That covers additive change, which is what has
+been needed so far; renames, drops and type changes would need real migration
+files and a version table.
 
 ## What is deliberately not built
 

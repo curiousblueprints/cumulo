@@ -206,6 +206,34 @@ export class MetadataStore {
     ).map(toField);
   }
 
+  /** Every reference field, on any table, that points at `tableId`. */
+  async listFieldsReferencing(tableId: Id): Promise<FieldDef[]> {
+    return (
+      await this.db.find(T.field, {
+        where: [
+          { column: 'type', operator: 'eq', value: FieldType.Reference },
+          { column: 'referenceTableId', operator: 'eq', value: tableId },
+        ],
+      })
+    ).map(toField);
+  }
+
+  /**
+   * Clear every lookup pointing at `recordId`. Removing the value row is how a
+   * lookup is emptied, so this leaves the referencing records in place -- these
+   * are lookups, not master-detail.
+   */
+  async clearLookupsTo(tableId: Id, recordId: Id): Promise<number> {
+    const fields = await this.listFieldsReferencing(tableId);
+    if (fields.length === 0) return 0;
+    return this.db.deleteWhere(T.value, {
+      where: [
+        { column: 'fieldId', operator: 'in', value: fields.map((field) => field.id) },
+        { column: 'value', operator: 'eq', value: recordId },
+      ],
+    });
+  }
+
   async listFieldsByIds(ids: Id[]): Promise<FieldDef[]> {
     if (ids.length === 0) return [];
     return (
@@ -220,7 +248,10 @@ export class MetadataStore {
   // --- securityRule and friends -----------------------------------------
 
   async insertSecurityRule(rule: SecurityRule): Promise<SecurityRule> {
-    await this.db.insert(T.securityRule, { ...rule, accessTypes: rule.accessTypes.join(',') });
+    await this.db.insert(T.securityRule, {
+      ...rule,
+      accessTypes: rule.accessTypes.join(','),
+    });
     return rule;
   }
 
@@ -442,6 +473,7 @@ function toSecurityRule2(row: Row): SecurityRule {
       .split(',')
       .map((part) => part.trim())
       .filter((part) => part.length > 0) as AccessType[],
+    canCreate: bool(row, 'canCreate'),
     clauseMatch: str(row, 'clauseMatch') as ClauseMatch,
     clauseLogic: nullableStr(row, 'clauseLogic'),
     createdAt: str(row, 'createdAt'),

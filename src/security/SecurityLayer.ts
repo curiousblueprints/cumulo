@@ -1,5 +1,6 @@
 import {
   AccessType,
+  FieldType,
   type FieldDef,
   type Id,
   type Namespace,
@@ -14,7 +15,12 @@ import { newId, nowIso } from '../util/index.js';
 import { ruleApplies, type CompiledRule, type ValueMap } from './clauses.js';
 import type { SecurityContext } from './context.js';
 import { AccessDeniedError, NotFoundError, ValidationError } from './errors.js';
-import { PermissionResolver, rulesGranting, type PermissionSet } from './PermissionResolver.js';
+import {
+  PermissionResolver,
+  rulesGranting,
+  rulesGrantingCreate,
+  type PermissionSet,
+} from './PermissionResolver.js';
 import { fromStoredValue, toStoredValue } from './values.js';
 
 export interface QueryOptions {
@@ -189,9 +195,10 @@ export class SecurityLayer {
   }
 
   /**
-   * Creating is governed by EDIT access: the rule's clauses are evaluated
-   * against the record as it would be written, so a role cannot create a
-   * record it would not then be allowed to edit.
+   * Creating is a table-level grant: a rule whose `canCreate` is set permits
+   * inserting into its table. The clauses play no part -- there is no record
+   * yet for them to describe -- but the rule's fields still bound what the
+   * creator may set.
    */
   async createRecord(
     context: SecurityContext,
@@ -209,17 +216,15 @@ export class SecurityLayer {
         throw new ValidationError(`Field "${field.name}" is required`);
       }
     }
-    await this.assertReferencesExist(stored, fields);
+    await this.assertLookupsResolve(stored, fields, null);
 
     let writable: ReadonlySet<Id> | null = null;
     if (!permissions.isAdministrator) {
-      const matching = rulesGranting(permissions, table.id, AccessType.Edit).filter((rule) =>
-        ruleApplies(rule, stored, fields, context.user),
-      );
-      if (matching.length === 0) {
+      const granting = rulesGrantingCreate(permissions, table.id);
+      if (granting.length === 0) {
         throw new AccessDeniedError(`No permission to create records in "${table.name}"`);
       }
-      writable = fieldUnion(matching);
+      writable = fieldUnion(granting);
       for (const [fieldId, value] of stored) {
         if (value !== null && !writable.has(fieldId)) {
           throw new AccessDeniedError(
@@ -267,7 +272,7 @@ export class SecurityLayer {
     const current = (await this.valuesByRecord([record.id])).get(record.id) ?? new Map();
 
     const patch = this.normalizeInput(input, byName);
-    await this.assertReferencesExist(patch, fields);
+    await this.assertLookupsResolve(patch, fields, record.id);
 
     let writable: ReadonlySet<Id> | null = null;
     if (!permissions.isAdministrator) {
@@ -320,8 +325,46 @@ export class SecurityLayer {
     }
 
     await this.store.transaction(async () => {
+      // Lookups are lookups, never master-detail: deleting a record clears the
+      // fields pointing at it rather than deleting whatever pointed.
+      await this.store.clearLookupsTo(record.tableId, record.id);
       await this.store.deleteRecord(record.id);
     });
+  }
+
+  // --- what the caller may do, for the UI to ask before offering it -------
+
+  /** Whether the user may create records in this table at all. */
+  async canCreate(context: SecurityContext, tableId: Id): Promise<boolean> {
+    const permissions = await this.permissions(context);
+    if (permissions.isAdministrator) return true;
+    return rulesGrantingCreate(permissions, tableId).length > 0;
+  }
+
+  /** Fields the user may set when creating a record in this table. */
+  async listCreatableFields(context: SecurityContext, tableId: Id): Promise<FieldDef[]> {
+    return this.grantedFields(context, tableId, (permissions) =>
+      rulesGrantingCreate(permissions, tableId),
+    );
+  }
+
+  /** Fields the user may write when editing a record in this table. */
+  async listEditableFields(context: SecurityContext, tableId: Id): Promise<FieldDef[]> {
+    return this.grantedFields(context, tableId, (permissions) =>
+      rulesGranting(permissions, tableId, AccessType.Edit),
+    );
+  }
+
+  private async grantedFields(
+    context: SecurityContext,
+    tableId: Id,
+    select: (permissions: PermissionSet) => CompiledRule[],
+  ): Promise<FieldDef[]> {
+    const permissions = await this.permissions(context);
+    const fields = await this.store.listFields(tableId);
+    if (permissions.isAdministrator) return fields;
+    const granted = fieldUnion(select(permissions));
+    return fields.filter((field) => granted.has(field.id));
   }
 
   // --- internals ---------------------------------------------------------
@@ -377,17 +420,51 @@ export class SecurityLayer {
     return stored;
   }
 
-  private async assertReferencesExist(
+  /**
+   * Check every lookup being written: the target has to exist and belong to
+   * the table the field points at. A lookup whose target table is its own
+   * table is a hierarchy, so those are also checked for cycles -- a record
+   * that is its own ancestor is not a hierarchy.
+   */
+  private async assertLookupsResolve(
     values: Map<Id, string | null>,
     fields: ReadonlyMap<Id, FieldDef>,
+    recordId: Id | null,
   ): Promise<void> {
     for (const [fieldId, value] of values) {
       const field = fields.get(fieldId);
-      if (!field || field.type !== 'reference' || value === null) continue;
+      if (!field || field.type !== FieldType.Reference || value === null) continue;
+
       const target = await this.store.getRecord(value);
       if (!target || (field.referenceTableId && target.tableId !== field.referenceTableId)) {
         throw new ValidationError(`Field "${field.name}" does not point at a valid record`);
       }
+      if (recordId && field.referenceTableId === target.tableId) {
+        await this.assertNoLookupCycle(field, recordId, value);
+      }
+    }
+  }
+
+  /** Walk up the chain from `targetId`; reaching `recordId` closes a loop. */
+  private async assertNoLookupCycle(
+    field: FieldDef,
+    recordId: Id,
+    targetId: Id,
+  ): Promise<void> {
+    const seen = new Set<Id>([recordId]);
+    let current: Id | null = targetId;
+    while (current) {
+      if (seen.has(current)) {
+        throw new ValidationError(
+          `Field "${field.name}" would make this record its own ancestor`,
+        );
+      }
+      seen.add(current);
+      const values: Map<Id, string | null> | undefined = (
+        await this.valuesByRecord([current])
+      ).get(current);
+      const next: string | null = values?.get(field.id) ?? null;
+      current = next === null || next === '' ? null : next;
     }
   }
 

@@ -36,7 +36,10 @@ export interface ClauseInput {
 export interface SecurityRuleInput {
   name: string;
   tableId: Id;
+  /** Record-level grants: read, edit, delete. May be empty for create-only. */
   accessTypes: AccessType[];
+  /** Table-level grant: may records be created in this table? */
+  canCreate?: boolean;
   clauseMatch?: ClauseMatch;
   clauseLogic?: string | null;
   clauses?: ClauseInput[];
@@ -258,12 +261,24 @@ export class MetadataService {
       let referenceTableId: Id | null = null;
       if (input.type === FieldType.Reference) {
         if (!input.referenceTableId) {
-          throw new ValidationError('A reference field must name the table it points at');
+          throw new ValidationError('A lookup field must name the table it points at');
         }
-        if (!(await store.getTable(input.referenceTableId))) {
-          throw new ValidationError('Referenced table does not exist');
+        // A lookup back to the field's own table is a hierarchy, and is
+        // allowed; it just cannot be required, since the first record would
+        // then have nothing to point at.
+        const target =
+          input.referenceTableId === table.id
+            ? table
+            : await store.getTable(input.referenceTableId);
+        if (!target) throw new ValidationError('Looked-up table does not exist');
+        if (target.id === table.id && (input.isRequired ?? false)) {
+          throw new ValidationError(
+            'A lookup to its own table cannot be required: the first record would have no target',
+          );
         }
-        referenceTableId = input.referenceTableId;
+        referenceTableId = target.id;
+      } else if (input.referenceTableId) {
+        throw new ValidationError('Only lookup fields may name a looked-up table');
       }
 
       const existing = await store.listFields(table.id);
@@ -304,8 +319,9 @@ export class MetadataService {
       if (!table) throw new ValidationError('Table does not exist');
 
       const accessTypes = [...new Set(input.accessTypes ?? [])];
-      if (accessTypes.length === 0) {
-        throw new ValidationError('A rule must grant at least one access type');
+      const canCreate = input.canCreate ?? false;
+      if (accessTypes.length === 0 && !canCreate) {
+        throw new ValidationError('A rule must grant at least one access type, or create');
       }
       for (const access of accessTypes) {
         if (!ALL_ACCESS_TYPES.includes(access)) {
@@ -360,6 +376,7 @@ export class MetadataService {
         name,
         tableId: table.id,
         accessTypes,
+        canCreate,
         clauseMatch,
         clauseLogic,
         createdAt: nowIso(),

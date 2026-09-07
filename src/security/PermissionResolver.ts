@@ -74,6 +74,7 @@ export class PermissionResolver {
         name: rule.name,
         tableId: rule.tableId,
         accessTypes: new Set<string>(rule.accessTypes),
+        canCreate: rule.canCreate,
         clauseMatch: rule.clauseMatch,
         clauseLogic: rule.clauseLogic,
         clauses: clauses.filter((clause) => clause.securityRuleId === rule.id),
@@ -114,4 +115,12 @@ export function rulesGranting(
   return (permissions.rulesByTable.get(tableId) ?? []).filter((rule) =>
     rule.accessTypes.has(access),
   );
+}
+
+/**
+ * Rules on `tableId` that permit creating. Creation is table-level, so unlike
+ * the others this needs no record to test against.
+ */
+export function rulesGrantingCreate(permissions: PermissionSet, tableId: Id): CompiledRule[] {
+  return (permissions.rulesByTable.get(tableId) ?? []).filter((rule) => rule.canCreate);
 }

@@ -5,7 +5,7 @@ import {
   ClauseOperator,
   FieldType,
   type FieldDef,
-  type TableDef,
+  type RecordView,
 } from '../../domain/types.js';
 import type { SecurityContext } from '../../security/context.js';
 import { AccessDeniedError } from '../../security/errors.js';
@@ -180,13 +180,14 @@ export function registerWebRoutes(router: Router, app: Application, sessions: Se
     const table = await app.security.getTable(context, tableId);
     const fields = await app.metadata.listReadableFields(context, table.id);
     const records = await app.records.list(context, table.id, { limit: 200 });
+    const mayCreate = await app.security.canCreate(context, table.id);
 
     const header = fields.map((field) => `<th>${escapeHtml(field.label)}</th>`).join('');
     const rows = records
       .map(
         (record) =>
           `<tr><td><a href="/records/${escapeHtml(record.id)}">Open</a></td>${fields
-            .map((field) => `<td>${escapeHtml(display(record.values[field.name]))}</td>`)
+            .map((field) => `<td>${cell(field, record.values[field.name])}</td>`)
             .join('')}</tr>`,
       )
       .join('');
@@ -196,7 +197,11 @@ export function registerWebRoutes(router: Router, app: Application, sessions: Se
         { title: table.label, context, ...messages(request) },
         `<h1>${escapeHtml(table.label)}</h1>
          <p class="lede">${records.length} record${records.length === 1 ? '' : 's'} visible to you.
-           <a href="/tables/${escapeHtml(table.id)}/new">New record</a></p>
+           ${
+             mayCreate
+               ? `<a href="/tables/${escapeHtml(table.id)}/new">New record</a>`
+               : ''
+           }</p>
          <section class="card"><table><thead><tr><th></th>${header}</tr></thead>
            <tbody>${rows || `<tr><td colspan="${fields.length + 1}" class="muted">Nothing to show.</td></tr>`}</tbody>
          </table></section>`,
@@ -208,7 +213,11 @@ export function registerWebRoutes(router: Router, app: Application, sessions: Se
     const context = requireUser(request);
     const tableId = request.params['tableId'] as string;
     const table = await app.security.getTable(context, tableId);
-    const fields = await writableFields(app, context, table);
+    if (!(await app.security.canCreate(context, table.id))) {
+      throw new AccessDeniedError(`No permission to create records in "${table.label}"`);
+    }
+    const fields = await app.security.listCreatableFields(context, table.id);
+    const lookups = await lookupOptions(app, context, fields);
 
     return html(
       page(
@@ -216,7 +225,7 @@ export function registerWebRoutes(router: Router, app: Application, sessions: Se
         `<h1>New ${escapeHtml(table.label)}</h1>
          <section class="card"><form method="post" action="/tables/${escapeHtml(table.id)}/records">
            ${csrfInput(request.session?.csrfToken)}
-           ${fields.map((field) => fieldInput(field, null)).join('')}
+           ${fields.map((field) => fieldInput(field, null, lookups)).join('')}
            <button>Create</button>
            <a class="button secondary" href="/tables/${escapeHtml(table.id)}">Cancel</a>
          </form></section>`,
@@ -231,7 +240,7 @@ export function registerWebRoutes(router: Router, app: Application, sessions: Se
         const context = requireUser(request);
         const tableId = request.params['tableId'] as string;
         const table = await app.security.getTable(context, tableId);
-        const fields = await writableFields(app, context, table);
+        const fields = await app.security.listCreatableFields(context, table.id);
         const record = await app.records.create(context, table.id, valuesFrom(request, fields));
         throw new RedirectSignal(withMessage(`/records/${record.id}`, 'notice', 'Record created'));
       },
@@ -244,14 +253,16 @@ export function registerWebRoutes(router: Router, app: Application, sessions: Se
     const recordId = request.params['recordId'] as string;
     const record = await app.records.get(context, recordId);
     const table = await app.security.getTable(context, record.tableId);
-    const fields = await writableFields(app, context, table);
+    const fields = await app.security.listEditableFields(context, table.id);
     const readable = await app.metadata.listReadableFields(context, table.id);
+    const lookups = await lookupOptions(app, context, fields);
 
     const details = readable
       .map(
         (field) =>
-          `<tr><th>${escapeHtml(field.label)}</th><td>${escapeHtml(
-            display(record.values[field.name]),
+          `<tr><th>${escapeHtml(field.label)}</th><td>${cell(
+            field,
+            record.values[field.name],
           )}</td></tr>`,
       )
       .join('');
@@ -271,7 +282,9 @@ export function registerWebRoutes(router: Router, app: Application, sessions: Se
              ? `<h2>Edit</h2><section class="card">
                 <form method="post" action="/records/${escapeHtml(record.id)}">
                   ${csrfInput(request.session?.csrfToken)}
-                  ${fields.map((field) => fieldInput(field, record.values[field.name])).join('')}
+                  ${fields
+                    .map((field) => fieldInput(field, record.values[field.name], lookups))
+                    .join('')}
                   <button>Save</button>
                 </form>
                 <form method="post" action="/records/${escapeHtml(record.id)}/delete">
@@ -291,8 +304,7 @@ export function registerWebRoutes(router: Router, app: Application, sessions: Se
         const context = requireUser(request);
         const recordId = request.params['recordId'] as string;
         const record = await app.records.get(context, recordId);
-        const table = await app.security.getTable(context, record.tableId);
-        const fields = await writableFields(app, context, table);
+        const fields = await app.security.listEditableFields(context, record.tableId);
         await app.records.update(context, record.id, valuesFrom(request, fields));
         return 'Record saved';
       },
@@ -469,7 +481,8 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
 
          <h2>Security rules</h2>
          <section class="card">
-           <table><thead><tr><th>Rule</th><th>Table</th><th>Access</th><th>Match</th></tr></thead><tbody>
+           <table><thead><tr><th>Rule</th><th>Table</th><th>Record access</th><th>Create</th>
+             <th>Match</th></tr></thead><tbody>
              ${
                rules
                  .map(
@@ -477,10 +490,11 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
                      `<tr><td>${escapeHtml(rule.name)}</td><td>${escapeHtml(
                        tableName(rule.tableId),
                      )}</td><td class="muted">${escapeHtml(
-                       rule.accessTypes.join(', '),
-                     )}</td><td class="muted">${escapeHtml(rule.clauseMatch)}</td></tr>`,
+                       rule.accessTypes.join(', ') || '&mdash;',
+                     )}</td><td class="muted">${rule.canCreate ? 'yes' : 'no'}</td>` +
+                     `<td class="muted">${escapeHtml(rule.clauseMatch)}</td></tr>`,
                  )
-                 .join('') || '<tr><td colspan="4" class="muted">No rules yet.</td></tr>'
+                 .join('') || '<tr><td colspan="5" class="muted">No rules yet.</td></tr>'
              }
            </tbody></table>
            <p class="muted">Build a rule on a table&rsquo;s page, then assign it to a role here.</p>
@@ -541,7 +555,7 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
                </select></div>
              </div>
              <div class="row">
-               <div><label>Reference target (reference fields only)</label>
+               <div><label>Looked-up table (lookup fields only; may be this table)</label>
                  <select name="referenceTableId">
                    <option value="">&mdash;</option>
                    ${optionList(tables.map((other) => ({ id: other.id, label: other.label })))}
@@ -560,11 +574,15 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
              <input type="hidden" name="tableId" value="${escapeHtml(table.id)}">
              <label>Rule name</label><input name="name" required>
              <div class="row">
-               <div><label>Access</label>
+               <div><label>Record access (per record, gated by the clauses)</label>
                  <select name="accessTypes" multiple size="3">
                    ${optionList(
                      Object.values(AccessType).map((access) => ({ id: access, label: access })),
                    )}
+                 </select>
+                 <label>Create (whole table; the clauses do not apply)</label>
+                 <select name="canCreate">
+                   <option value="">No</option><option value="on">Yes</option>
                  </select></div>
                <div><label>Clause matching</label><select name="clauseMatch">
                  ${optionList(Object.values(ClauseMatch).map((match) => ({ id: match, label: match })))}
@@ -708,6 +726,7 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
         name: body['name'] ?? '',
         tableId: body['tableId'] ?? '',
         accessTypes: multi(request, 'accessTypes') as AccessType[],
+        canCreate: body['canCreate'] === 'on',
         clauseMatch: (body['clauseMatch'] ?? ClauseMatch.All) as ClauseMatch,
         clauseLogic: body['clauseLogic'] || null,
         clauses,
@@ -732,25 +751,47 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
 
 // --- helpers -------------------------------------------------------------
 
+/** One selectable target per lookup field, keyed by field id. */
+type LookupOptions = Map<string, { id: string; label: string }[]>;
+
 /**
- * Fields the user may write. For an administrator that is every field; for
- * anyone else it is the union of the fields granted by rules that give edit
- * access, which the security layer would enforce anyway.
+ * Load the records a lookup field can point at, through the security layer, so
+ * the picker only ever offers records the user can actually see.
  */
-async function writableFields(
+async function lookupOptions(
   app: Application,
   context: SecurityContext,
-  table: TableDef,
-): Promise<FieldDef[]> {
-  if (context.role.isSystem) return app.security.listAllFields(context, table.id);
-  const permissions = await app.security.permissions(context);
-  const rules = (permissions.rulesByTable.get(table.id) ?? []).filter((rule) =>
-    rule.accessTypes.has(AccessType.Edit),
-  );
-  const granted = new Set<string>();
-  for (const rule of rules) for (const fieldId of rule.fieldIds) granted.add(fieldId);
-  const readable = await app.metadata.listReadableFields(context, table.id);
-  return readable.filter((field) => granted.has(field.id));
+  fields: FieldDef[],
+): Promise<LookupOptions> {
+  const options: LookupOptions = new Map();
+  for (const field of fields) {
+    if (field.type !== FieldType.Reference || !field.referenceTableId) continue;
+    try {
+      const targets = await app.records.list(context, field.referenceTableId, { limit: 200 });
+      const labelFields = await app.metadata.listReadableFields(context, field.referenceTableId);
+      options.set(
+        field.id,
+        targets.map((target) => ({ id: target.id, label: recordLabel(target, labelFields) })),
+      );
+    } catch {
+      // No access to the looked-up table: offer nothing rather than failing
+      // the whole page. Typing an id is still refused by the security layer.
+      options.set(field.id, []);
+    }
+  }
+  return options;
+}
+
+/** A record's stand-in name: its first non-empty readable text-ish value. */
+function recordLabel(record: RecordView, fields: FieldDef[]): string {
+  for (const field of fields) {
+    if (field.type === FieldType.Reference) continue;
+    const value = record.values[field.name];
+    if (value !== null && value !== undefined && String(value).length > 0) {
+      return `${String(value)} (${record.id.slice(0, 8)})`;
+    }
+  }
+  return record.id;
 }
 
 function valuesFrom(request: HttpRequest, fields: FieldDef[]): Record<string, unknown> {
@@ -764,7 +805,7 @@ function valuesFrom(request: HttpRequest, fields: FieldDef[]): Record<string, un
   return values;
 }
 
-function fieldInput(field: FieldDef, current: unknown): string {
+function fieldInput(field: FieldDef, current: unknown, lookups: LookupOptions): string {
   const name = `field_${field.name}`;
   const label = `<label for="${escapeHtml(name)}">${escapeHtml(field.label)}${
     field.isRequired ? ' *' : ''
@@ -772,6 +813,21 @@ function fieldInput(field: FieldDef, current: unknown): string {
   const value = escapeHtml(display(current));
 
   switch (field.type) {
+    case FieldType.Reference: {
+      const targets = lookups.get(field.id) ?? [];
+      const currentId = current === null || current === undefined ? '' : String(current);
+      // A value the picker cannot show (no read access to that record) is kept
+      // as an option so saving the form does not silently clear the lookup.
+      const missing =
+        currentId && !targets.some((target) => target.id === currentId)
+          ? `<option value="${escapeHtml(currentId)}" selected>${escapeHtml(currentId)}</option>`
+          : '';
+      return `${label}<select id="${escapeHtml(name)}" name="${escapeHtml(name)}"${
+        field.isRequired ? ' required' : ''
+      }>
+        <option value=""${currentId ? '' : ' selected'}>&mdash; none &mdash;</option>
+        ${missing}${optionList(targets, currentId)}</select>`;
+    }
     case FieldType.Boolean:
       return `${label}<select id="${escapeHtml(name)}" name="${escapeHtml(name)}">
         <option value="off"${current === true ? '' : ' selected'}>No</option>
@@ -793,6 +849,15 @@ function fieldInput(field: FieldDef, current: unknown): string {
         field.isRequired ? ' required' : ''
       }>`;
   }
+}
+
+/** A table cell: lookups link through to the record they point at. */
+function cell(field: FieldDef, value: unknown): string {
+  if (field.type === FieldType.Reference && value) {
+    const id = String(value);
+    return `<a href="/records/${escapeHtml(id)}"><code>${escapeHtml(id.slice(0, 8))}</code></a>`;
+  }
+  return escapeHtml(display(value));
 }
 
 function display(value: unknown): string {

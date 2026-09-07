@@ -145,8 +145,10 @@ export const PLATFORM_SCHEMA: Schema = [
         type: 'text',
         references: { table: T.table, column: 'id', onDelete: 'cascade' },
       },
-      /** Comma-separated AccessType values, e.g. "read,edit". */
+      /** Comma-separated AccessType values, e.g. "read,edit". May be empty
+       *  when the rule only grants create. */
       { name: 'accessTypes', type: 'text' },
+      { name: 'canCreate', type: 'boolean' },
       { name: 'clauseMatch', type: 'text' },
       { name: 'clauseLogic', type: 'text', nullable: true },
       createdAt,

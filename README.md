@@ -106,7 +106,7 @@ tables be defined at runtime.
 | `users` | Users, each with exactly one security role. |
 | `table` | Logical tables ("objects"), owned by a namespace. |
 | `field` | Fields on a table, with a type and an owning namespace. |
-| `securityRule` | Access types + clause matching, for one table. |
+| `securityRule` | Access types, create, and clause matching, for one table. |
 | `securityRuleClause` | The predicates deciding which records a rule covers. |
 | `securityRuleField` | The fields a rule grants when it applies. |
 | `securityRoleRule` | Junction: this rule applies to this role. |
@@ -127,8 +127,12 @@ tables be defined at runtime.
    `1 AND (2 OR 3)`).
 5. **Then fields.** A record's visible fields are the union of the fields
    named by the rules that matched it. A field no rule grants does not appear
-   in the response at all.
-6. **Default deny.** A role with no rules sees nothing.
+   in the response at all, and an edit may not touch it.
+6. **Creating is separate, and table-level.** A rule's `canCreate` says whether
+   it permits inserting into its table. The clauses play no part -- there is no
+   record yet for them to describe -- but the rule's fields still bound what a
+   creator may set. So "may create, may only read back their own" is one rule.
+7. **Default deny.** A role with no rules sees nothing.
 
 A record outside your rules reports as *not found*, not *forbidden*, so record
 ids cannot be probed.
@@ -136,6 +140,26 @@ ids cannot be probed.
 Clause target values understand `$user.id`, `$user.username` and
 `$user.securityRoleId`, which is how you write "records this user owns"
 without hard-coding anyone.
+
+## Lookups
+
+A field of type `reference` is a **lookup**: it points at a record in the table
+the field names. There is no master-detail -- every relationship is a lookup,
+and none of them owns anything.
+
+- A lookup may point at its **own table**, which is how you build a hierarchy
+  (`Department.parent`). Such a field cannot be required: the first record
+  would have nothing to point at.
+- Hierarchies stay acyclic. Setting a self-lookup walks the chain from the
+  target, and a record that would become its own ancestor is refused.
+- Writing a lookup checks that the target exists and lives in the table the
+  field points at.
+- **Deleting a looked-up record clears the lookups pointing at it and leaves
+  those records alone.** Deleting a department detaches its children rather
+  than deleting them; that difference is the whole of "lookup, not
+  master-detail".
+- In the UI a lookup renders as a picker of the records the user can actually
+  read, and displays as a link through to its target.
 
 ## Tests
 
@@ -151,18 +175,23 @@ protection) and the HTTP surface end to end.
 
 Recorded so they are easy to overturn:
 
-- **Create is governed by EDIT.** Access types are read/edit/delete, so a role
-  that may edit a table may create in it -- and the clauses are checked against
-  the record as it would be written, so you cannot create a record you would
-  not then be allowed to edit.
+- **Create is its own grant**, a `canCreate` flag on the rule, and it is
+  table-level: a rule with clauses can grant creation of records those clauses
+  would not then cover. A rule may grant create and nothing else.
 - **Update checks the record as it stands**, not as it will stand. A permitted
   edit may therefore move a record out of your own visibility, the way
   transferring ownership does on a hierarchy-scoped platform.
 - **"Some" clause matching is `custom`**, an expression over clause sequence
   numbers supporting `AND`, `OR`, `NOT` and parentheses.
-- **Field access is a union** across every rule that matched the record.
-- **Nulls fail closed.** An empty field satisfies only `isNull`; `field != x`
-  does not match records where the field is empty.
+- **Field access is a union** across every rule that matched the record. Fields
+  a user cannot write are never modified: an update naming one is refused
+  rather than silently dropped, so the caller learns nothing was written.
+- **Empty values are read literally.** An empty field is not equal to "x", so
+  `field != x` matches it, and two empty values are equal to each other. The
+  ordering and text operators have nothing to compare, so they are false. Ask
+  about emptiness itself with `isNull` / `isNotNull`.
 - **Security rules target custom tables only.** Platform metadata is not
   described as `table`/`field` rows, so only Administrator can change it.
+- `applySchema` adds columns an existing database is missing, which is enough
+  for additive changes. Anything destructive would need a real migration.
 - Sessions are in-memory, so restarting the server signs everyone out.

@@ -16,9 +16,12 @@ export const STD_NAMESPACE = 'std';
 export const ADMINISTRATOR_ROLE = 'Administrator';
 
 /**
- * The operations a security rule can grant. A rule must grant at least one.
- * Creating a record is governed by EDIT: a role that may edit a table may
- * insert into it, provided the new record satisfies the rule's clauses.
+ * The record-level operations a security rule can grant. A rule must grant at
+ * least one of these, or set `canCreate`.
+ *
+ * These are all evaluated per record, against the rule's clauses. Creating is
+ * not: it is a table-level grant, carried by `SecurityRule.canCreate`, because
+ * there is no record yet to evaluate clauses against.
  */
 export enum AccessType {
   Read = 'read',
@@ -144,6 +147,12 @@ export interface SecurityRule {
   name: string;
   tableId: Id;
   accessTypes: AccessType[];
+  /**
+   * Whether the rule grants creating records in its table. Table-level, so the
+   * clauses play no part: a new record has no values to evaluate them against.
+   * The fields the rule names still apply -- they are what a creator may set.
+   */
+  canCreate: boolean;
   clauseMatch: ClauseMatch;
   /** Only meaningful when `clauseMatch` is Custom. */
   clauseLogic: string | null;

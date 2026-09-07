@@ -234,3 +234,94 @@ test('a multi-select posts every selected value', async () => {
   assert.deepEqual(rules[0]?.accessTypes.sort(), ['edit', 'read']);
   await close();
 });
+
+test('the UI offers creation only where a rule permits it', async () => {
+  const { app, base, close } = await serve();
+  const admin = await app.install.completeSetup({
+    username: 'root',
+    email: 'r@e.com',
+    password: 'correct horse',
+  });
+  const std = (await app.metadata.listNamespaces(admin))[0];
+  assert.ok(std);
+  const table = await app.metadata.createTable(admin, { namespaceId: std.id, name: 'Note' });
+  const body = await app.metadata.createField(admin, {
+    tableId: table.id,
+    name: 'body',
+    type: 'text' as never,
+  });
+
+  const role = await app.metadata.createSecurityRole(admin, {
+    name: 'Readers',
+    parentId: admin.role.id,
+  });
+  const readOnly = await app.metadata.createSecurityRule(admin, {
+    name: 'Read notes',
+    tableId: table.id,
+    accessTypes: ['read' as never],
+    fieldIds: [body.id],
+  });
+  await app.metadata.assignRuleToRole(admin, role.id, readOnly.id);
+  await app.metadata.createUser(admin, {
+    username: 'reader',
+    email: 'reader@e.com',
+    password: 'password123',
+    securityRoleId: role.id,
+  });
+
+  const client = new Client(base);
+  await client.post('/login', { username: 'reader', password: 'password123' });
+
+  const listing = await (await client.get(`/tables/${table.id}`)).text();
+  assert.doesNotMatch(listing, /New record/);
+  assert.equal((await client.get(`/tables/${table.id}/new`)).status, 403);
+  await close();
+});
+
+test('a lookup field renders as a picker of records the user can see', async () => {
+  const { app, base, close } = await serve();
+  const admin = await app.install.completeSetup({
+    username: 'root',
+    email: 'r@e.com',
+    password: 'correct horse',
+  });
+  const std = (await app.metadata.listNamespaces(admin))[0];
+  assert.ok(std);
+  const account = await app.metadata.createTable(admin, {
+    namespaceId: std.id,
+    name: 'Account',
+  });
+  await app.metadata.createField(admin, {
+    tableId: account.id,
+    name: 'name',
+    type: 'text' as never,
+  });
+  const contact = await app.metadata.createTable(admin, {
+    namespaceId: std.id,
+    name: 'Contact',
+  });
+  await app.metadata.createField(admin, {
+    tableId: contact.id,
+    name: 'account',
+    type: 'reference' as never,
+    referenceTableId: account.id,
+  });
+  const acme = await app.records.create(admin, account.id, { name: 'Acme' });
+
+  const client = new Client(base);
+  await client.post('/login', { username: 'root', password: 'correct horse' });
+
+  const form = await (await client.get(`/tables/${contact.id}/new`)).text();
+  assert.match(form, new RegExp(`<option value="${acme.id}"`));
+  assert.match(form, /Acme/);
+
+  const created = await client.post(`/tables/${contact.id}/records`, {
+    _csrf: csrf(form),
+    field_account: acme.id,
+  });
+  const recordPath = (created.headers.get('location') ?? '').split('?')[0] as string;
+  const detail = await (await client.get(recordPath)).text();
+  // The lookup links through to the record it points at.
+  assert.match(detail, new RegExp(`href="/records/${acme.id}"`));
+  await close();
+});
