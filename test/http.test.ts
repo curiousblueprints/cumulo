@@ -575,3 +575,42 @@ test('the role hierarchy page nests roles under their parents', async () => {
   assert.equal((await stranger.get('/admin/roles')).status, 403);
   await close();
 });
+
+test('the role page orders tabs top to bottom, with up and down controls', async () => {
+  const { app, base, close } = await serve();
+  const admin = await app.install.completeSetup({
+    username: 'root',
+    email: 'r@e.com',
+    password: 'correct horse',
+  });
+  const std = (await app.metadata.listNamespaces(admin))[0];
+  assert.ok(std);
+  for (const name of ['Account', 'Contact', 'Invoice']) {
+    const table = await app.metadata.createTable(admin, { namespaceId: std.id, name });
+    await app.metadata.addRoleTab(admin, admin.role.id, table.id);
+  }
+
+  const client = new Client(base);
+  await client.post('/login', { username: 'root', password: 'correct horse' });
+  const rolePage = await (await client.get(`/admin/roles/${admin.role.id}`)).text();
+
+  // The list runs top to bottom here, whatever the tab bar does.
+  assert.match(rolePage, /aria-label="Move up"/);
+  assert.match(rolePage, /aria-label="Move down"/);
+  assert.doesNotMatch(rolePage, /&larr;|&rarr;/);
+  // The ends are fixed: nothing above the first, nothing below the last.
+  assert.equal((rolePage.match(/disabled/g) ?? []).length, 2);
+
+  const tabIds = [...rolePage.matchAll(/action="\/admin\/tabs\/([^/]+)\/move"/g)].map(
+    (match) => match[1] as string,
+  );
+  const last = tabIds[tabIds.length - 1] as string;
+
+  await client.post(`/admin/tabs/${last}/move`, { _csrf: csrf(rolePage), direction: 'earlier' });
+  const me = await client.json<{ tabs: { label: string }[] }>('/api/v1/me');
+  assert.deepEqual(
+    me.tabs.map((tab) => tab.label),
+    ['Account', 'Invoice', 'Contact'],
+  );
+  await close();
+});

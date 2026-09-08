@@ -23,10 +23,8 @@ import {
   type TableView,
 } from './api';
 import { RecordForm } from './RecordForm';
-import type { Route } from './router';
+import type { Navigate } from './router';
 import { displayValue } from './values';
-
-type Navigate = (route: Route) => void;
 
 /** Loads lookup targets so a reference field can be picked, not typed. */
 async function loadLookups(
@@ -86,36 +84,21 @@ function Failed({ message }: { message: string }): ReactNode {
   );
 }
 
-export function HomePage({ session, navigate }: { session: Session; navigate: Navigate }): ReactNode {
-  if (session.tabs.length === 0) {
-    return (
-      <Stack gap="xs" maw={620}>
-        <Title order={2}>Nothing on your tabs yet</Title>
-        <Text c="dimmed">
-          Which tables appear here is set per security role, and the{' '}
-          <strong>{session.role.name}</strong> role has none configured.
-          {session.role.isAdministrator
-            ? ' Add some under Setup, on the role.'
-            : ' An administrator can add them under Setup.'}
-        </Text>
-      </Stack>
-    );
-  }
+/**
+ * What /app shows when there is nowhere to send you. With tabs configured the
+ * app lands on the first one instead, so this is the empty case only.
+ */
+export function NoTabsPage({ session }: { session: Session }): ReactNode {
   return (
     <Stack gap="xs" maw={620}>
-      <Title order={2}>Welcome, {session.user.username}</Title>
-      <Text c="dimmed">Pick a tab to get started, or search across everything you can see.</Text>
-      <Group gap="xs" mt="sm">
-        {session.tabs.map((tab) => (
-          <Button
-            key={tab.id}
-            variant="light"
-            onClick={() => navigate({ kind: 'table', tableId: tab.id })}
-          >
-            {tab.label}
-          </Button>
-        ))}
-      </Group>
+      <Title order={2}>Nothing on your tabs yet</Title>
+      <Text c="dimmed">
+        Which tables appear along the top is set per security role, and the{' '}
+        <strong>{session.role.name}</strong> role has none configured.
+        {session.role.isAdministrator
+          ? ' Add some under Setup, on the role.'
+          : ' An administrator can add them under Setup.'}
+      </Text>
     </Stack>
   );
 }

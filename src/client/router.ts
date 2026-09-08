@@ -42,7 +42,18 @@ export function hrefFor(route: Route): string {
   }
 }
 
-export function useRouter(): { route: Route; navigate: (route: Route) => void } {
+export interface NavigateOptions {
+  /**
+   * Overwrite the current entry rather than adding one. Used when the app
+   * sends you somewhere you did not ask to go -- landing on the first tab --
+   * so the back button leaves the app instead of bouncing off the redirect.
+   */
+  replace?: boolean;
+}
+
+export type Navigate = (route: Route, options?: NavigateOptions) => void;
+
+export function useRouter(): { route: Route; navigate: Navigate } {
   const [route, setRoute] = useState<Route>(() => parseRoute(new URL(window.location.href)));
 
   useEffect(() => {
@@ -51,8 +62,10 @@ export function useRouter(): { route: Route; navigate: (route: Route) => void } 
     return () => window.removeEventListener('popstate', onPop);
   }, []);
 
-  const navigate = useCallback((next: Route) => {
-    window.history.pushState({}, '', hrefFor(next));
+  const navigate = useCallback<Navigate>((next, options) => {
+    const href = hrefFor(next);
+    if (options?.replace) window.history.replaceState({}, '', href);
+    else window.history.pushState({}, '', href);
     setRoute(next);
   }, []);
 

@@ -71,8 +71,10 @@ one by hand while testing.
 ## The two faces
 
 The **user space** at `/app` is a React and [Mantine](https://mantine.dev)
-client: a centred global search, sign-out and setup at the far right, and the
-role's tabs beneath. It talks to a JSON API under `/api/v1`.
+client: a centred global search, a setup gear and an avatar at the far right,
+and the role's tabs beneath. Who you are and signing out live behind the
+avatar. `/app` itself sends you to your first tab -- there is no landing page
+to read. It talks to a JSON API under `/api/v1`.
 
 The **setup console** at `/admin` is server-rendered HTML. It has its own
 frame on purpose -- nothing is shared between the two, so it is obvious at a
@@ -239,8 +241,10 @@ their values and their field grants. Two are refused:
 
 ## Tabs and global search
 
-**Tabs** decide which tables a user sees along the top, and in what order. They
-are configured per security role, on the role's page in setup.
+**Tabs** decide which tables a user sees along the top, and in what order --
+and, since `/app` opens the first one, which table they land on. They are
+configured per security role, on the role's page in setup, where the list runs
+top to bottom and the first entry is the leftmost tab.
 
 Tabs are the one thing in the model that is **not** inherited: unlike rules,
 they neither roll up from child roles nor come down from a parent. What a role
@@ -283,7 +287,7 @@ and none of them owns anything.
 npm test
 ```
 
-88 tests over the adapter, the clause-logic parser, the security layer
+90 tests over the adapter, the clause-logic parser, the security layer
 (hierarchy inheritance, record filtering, per-field grants and the ceiling over
 them, namespace gating, metadata protection), lookups, tabs and global search,
 the rename migration, and the HTTP surface end to end -- the setup console as

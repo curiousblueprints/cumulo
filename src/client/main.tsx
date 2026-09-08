@@ -6,7 +6,7 @@ import { createRoot } from 'react-dom/client';
 import { api, type Session } from './api';
 import { useRouter } from './router';
 import { Shell } from './Shell';
-import { HomePage, NewRecordPage, RecordPage, SearchPage, TablePage } from './pages';
+import { NewRecordPage, NoTabsPage, RecordPage, SearchPage, TablePage } from './pages';
 
 const theme = createTheme({
   primaryColor: 'indigo',
@@ -26,6 +26,16 @@ function App(): ReactNode {
       .catch(() => window.location.assign('/login'));
   }, []);
 
+  // There is nothing to say on a landing page, so /app is the first tab.
+  // Replacing the entry rather than pushing one keeps the back button pointed
+  // out of the app instead of at a redirect that would fire again.
+  const firstTab = session?.tabs[0];
+  useEffect(() => {
+    if (route.kind === 'home' && firstTab) {
+      navigate({ kind: 'table', tableId: firstTab.id }, { replace: true });
+    }
+  }, [route.kind, firstTab, navigate]);
+
   if (!session) {
     return (
       <Center h="100vh">
@@ -36,7 +46,7 @@ function App(): ReactNode {
 
   return (
     <Shell session={session} route={route} navigate={navigate}>
-      {route.kind === 'home' && <HomePage session={session} navigate={navigate} />}
+      {route.kind === 'home' && <NoTabsPage session={session} />}
       {route.kind === 'table' && <TablePage tableId={route.tableId} navigate={navigate} />}
       {route.kind === 'new' && <NewRecordPage tableId={route.tableId} navigate={navigate} />}
       {route.kind === 'record' && <RecordPage recordId={route.recordId} navigate={navigate} />}

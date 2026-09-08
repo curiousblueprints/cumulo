@@ -630,18 +630,24 @@ export class MetadataService {
     });
   }
 
-  /** Move a tab one place left or right. */
+  /**
+   * Move a tab one place through the order.
+   *
+   * "earlier" and "later" rather than a direction: the same order is drawn
+   * left-to-right on the tab bar and top-to-bottom in setup, so neither
+   * left/right nor up/down would be true in both places.
+   */
   async moveRoleTab(
     context: SecurityContext,
     tabId: Id,
-    direction: 'left' | 'right',
+    direction: 'earlier' | 'later',
   ): Promise<void> {
     await this.security.asAdministrator(context, async (store) => {
       const tab = await store.getRoleTab(tabId);
       if (!tab) throw new ValidationError('Tab does not exist');
       const tabs = await store.listRoleTabs(tab.securityRoleId);
       const index = tabs.findIndex((other) => other.id === tab.id);
-      const target = direction === 'left' ? index - 1 : index + 1;
+      const target = direction === 'earlier' ? index - 1 : index + 1;
       if (index === -1 || target < 0 || target >= tabs.length) return;
 
       const swapped = [...tabs];

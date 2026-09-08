@@ -84,13 +84,15 @@ test('tabs can be reordered and removed', async () => {
   const invoice = tabs.find((entry) => entry.table.name === 'Invoice');
   assert.ok(invoice);
 
-  await app.metadata.moveRoleTab(admin, invoice.tab.id, 'left');
+  await app.metadata.moveRoleTab(admin, invoice.tab.id, 'earlier');
   assert.deepEqual(await order(), ['Account', 'Invoice', 'Contact']);
-  await app.metadata.moveRoleTab(admin, invoice.tab.id, 'left');
+  await app.metadata.moveRoleTab(admin, invoice.tab.id, 'earlier');
   assert.deepEqual(await order(), ['Invoice', 'Account', 'Contact']);
-  // Already leftmost: moving further is a no-op rather than an error.
-  await app.metadata.moveRoleTab(admin, invoice.tab.id, 'left');
+  // Already first: moving further is a no-op rather than an error.
+  await app.metadata.moveRoleTab(admin, invoice.tab.id, 'earlier');
   assert.deepEqual(await order(), ['Invoice', 'Account', 'Contact']);
+  await app.metadata.moveRoleTab(admin, invoice.tab.id, 'later');
+  assert.deepEqual(await order(), ['Account', 'Invoice', 'Contact']);
 
   await app.metadata.removeRoleTab(admin, invoice.tab.id);
   assert.deepEqual(await order(), ['Account', 'Contact']);
@@ -318,5 +320,24 @@ test('search treats % and _ as characters, not wildcards', async () => {
   );
   // Likewise "_" matches an underscore, and nothing here has one.
   assert.deepEqual(await app.security.search(admin, '_'), []);
+  await app.stop();
+});
+
+test('the tabs the client is given are the ones it lands on', async () => {
+  const { app, admin, std } = await installed();
+  // The client sends /app to the first tab, so the order the API reports is
+  // also which table a user sees when they sign in.
+  const contact = await app.metadata.createTable(admin, { namespaceId: std, name: 'Contact' });
+  const account = await app.metadata.createTable(admin, { namespaceId: std, name: 'Account' });
+
+  await app.metadata.addRoleTab(admin, admin.role.id, contact.id);
+  await app.metadata.addRoleTab(admin, admin.role.id, account.id);
+  assert.equal((await app.security.listTabs(admin))[0]?.name, 'Contact');
+
+  const tabs = await app.metadata.listRoleTabs(admin, admin.role.id);
+  const accountTab = tabs.find((entry) => entry.table.id === account.id);
+  assert.ok(accountTab);
+  await app.metadata.moveRoleTab(admin, accountTab.tab.id, 'earlier');
+  assert.equal((await app.security.listTabs(admin))[0]?.name, 'Account');
   await app.stop();
 });

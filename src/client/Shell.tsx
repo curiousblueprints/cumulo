@@ -2,22 +2,26 @@ import {
   ActionIcon,
   Anchor,
   AppShell,
+  Avatar,
   Box,
-  Button,
+  Divider,
   Group,
+  Menu,
+  Stack,
   Tabs,
   Text,
   TextInput,
   Tooltip,
+  UnstyledButton,
 } from '@mantine/core';
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import type { Session } from './api';
-import { hrefFor, type Route } from './router';
+import { hrefFor, type Navigate, type Route } from './router';
 
 interface ShellProps {
   session: Session;
   route: Route;
-  navigate: (route: Route) => void;
+  navigate: Navigate;
   children: ReactNode;
 }
 
@@ -65,19 +69,21 @@ export function Shell({ session, route, navigate, children }: ShellProps): React
             justify="flex-end"
             style={{ flex: '1 1 0', minWidth: 0 }}
           >
-            <Text size="sm" c="dimmed" visibleFrom="sm">
-              {session.user.username} &middot; {session.role.name}
-            </Text>
             {session.role.isAdministrator && (
-              <Button component="a" href="/admin" variant="subtle" size="compact-sm">
-                Setup
-              </Button>
+              <Tooltip label="Setup" withArrow>
+                <ActionIcon
+                  component="a"
+                  href="/admin"
+                  variant="subtle"
+                  color="gray"
+                  size="lg"
+                  aria-label="Setup"
+                >
+                  <GearIcon />
+                </ActionIcon>
+              </Tooltip>
             )}
-            <form method="post" action="/logout">
-              <Button type="submit" variant="subtle" size="compact-sm" color="gray">
-                Sign out
-              </Button>
-            </form>
+            <UserMenu session={session} />
           </Group>
         </Group>
 
@@ -103,12 +109,71 @@ export function Shell({ session, route, navigate, children }: ShellProps): React
   );
 }
 
+/**
+ * Who you are, tucked behind the avatar rather than spelled out along the top.
+ *
+ * Signing out is still a form post to the server, so the menu item submits a
+ * hidden one: the session lives in a cookie the client cannot clear itself.
+ */
+function UserMenu({ session }: { session: Session }): ReactNode {
+  const logout = useRef<HTMLFormElement>(null);
+
+  return (
+    <>
+      <form method="post" action="/logout" ref={logout} hidden />
+      {/* AppShell gives the header its own stacking context, so the dropdown
+          needs to sit above it explicitly or page content paints over it. */}
+      <Menu shadow="md" width={240} position="bottom-end" withArrow withinPortal zIndex={400}>
+        <Menu.Target>
+          <UnstyledButton aria-label="Account menu">
+            <Avatar color="indigo" radius="xl" size={34}>
+              {initials(session.user.username)}
+            </Avatar>
+          </UnstyledButton>
+        </Menu.Target>
+        <Menu.Dropdown>
+          <Stack gap={2} px="sm" py="xs">
+            <Text fw={600} size="sm">
+              {session.user.username}
+            </Text>
+            <Text size="xs" c="dimmed">
+              {session.role.name}
+            </Text>
+          </Stack>
+          <Divider />
+          {session.role.isAdministrator && (
+            <Menu.Item component="a" href="/admin" leftSection={<GearIcon />}>
+              Setup
+            </Menu.Item>
+          )}
+          <Menu.Item
+            color="red"
+            leftSection={<SignOutIcon />}
+            onClick={() => logout.current?.requestSubmit()}
+          >
+            Sign out
+          </Menu.Item>
+        </Menu.Dropdown>
+      </Menu>
+    </>
+  );
+}
+
+/** Up to two letters, from a username that may be one word or several. */
+function initials(username: string): string {
+  const parts = username.trim().split(/[\s._-]+/).filter(Boolean);
+  const [first, second] = parts;
+  if (!first) return '?';
+  if (!second) return first.slice(0, 2).toUpperCase();
+  return (first.slice(0, 1) + second.slice(0, 1)).toUpperCase();
+}
+
 function GlobalSearch({
   route,
   navigate,
 }: {
   route: Route;
-  navigate: (route: Route) => void;
+  navigate: Navigate;
 }): ReactNode {
   const [term, setTerm] = useState(route.kind === 'search' ? route.term : '');
 
@@ -140,6 +205,45 @@ function GlobalSearch({
         }
       />
     </form>
+  );
+}
+
+function GearIcon(): ReactNode {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.35.4.64.73.82H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </svg>
+  );
+}
+
+function SignOutIcon(): ReactNode {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+      <path d="m16 17 5-5-5-5" />
+      <path d="M21 12H9" />
+    </svg>
   );
 }
 

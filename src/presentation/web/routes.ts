@@ -506,6 +506,7 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
            <p class="muted">The tables this role sees along the top of the app, in this order.
              Tabs belong to this role alone &mdash; unlike rules, they are not inherited from a
              parent or rolled up from children.</p>
+           <p class="muted">First in this list is leftmost on the tab bar.</p>
            <table><thead><tr><th>#</th><th>Table</th><th>Order</th><th></th></tr></thead><tbody>
              ${
                tabs
@@ -517,16 +518,17 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
                         <td><form method="post" action="/admin/tabs/${escapeHtml(
                           entry.tab.id,
                         )}/move" class="inline">${csrfInput(token)}
-                            <button name="direction" value="left" class="secondary"
-                              style="margin:0"${index === 0 ? ' disabled' : ''}>&larr;</button>
+                            <button name="direction" value="earlier" class="secondary"
+                              style="margin:0" title="Move up"
+                              aria-label="Move up"${index === 0 ? ' disabled' : ''}>&uarr;</button>
                           </form>
                           <form method="post" action="/admin/tabs/${escapeHtml(
                             entry.tab.id,
                           )}/move" class="inline">${csrfInput(token)}
-                            <button name="direction" value="right" class="secondary"
-                              style="margin:0"${
+                            <button name="direction" value="later" class="secondary"
+                              style="margin:0" title="Move down" aria-label="Move down"${
                                 index === tabs.length - 1 ? ' disabled' : ''
-                              }>&rarr;</button>
+                              }>&darr;</button>
                           </form></td>
                         <td><form method="post" action="/admin/tabs/${escapeHtml(
                           entry.tab.id,
@@ -773,7 +775,7 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
       await app.metadata.moveRoleTab(
         context,
         request.params['tabId'] ?? '',
-        request.body['direction'] === 'left' ? 'left' : 'right',
+        request.body['direction'] === 'earlier' ? 'earlier' : 'later',
       );
       return 'Tab moved';
     }),
