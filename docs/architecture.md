@@ -308,7 +308,10 @@ ever see. It has caught this project twice:
   should have taken the level its rule justified.
 - `field.isSearchable` arrived false, including on Name fields, which are
   searchable from creation. Since global search looks at Name by default, that
-  turned search off completely on every upgraded installation.
+  turned search off completely on every upgraded installation. Search no longer
+  trusts that column for Name at all -- see **Global search** -- so the
+  migration now only keeps the stored data honest rather than being what makes
+  search work.
 
 So `install()` runs a **migration ledger**: an ordered list of one-time data
 migrations, each recorded in `schemaMigration` once it has run.

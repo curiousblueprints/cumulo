@@ -7,6 +7,7 @@ import {
   ClauseOperator,
   FieldAccess,
   FieldType,
+  isNameField,
   type FieldDef,
   type SecurityRole,
 } from '../../domain/types.js';
@@ -582,8 +583,8 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
 
          <h2>Fields</h2>
          <section class="card">
-           <p class="muted">A global search always looks at Name. Mark any other field
-             searchable to have matches on it return the record too.</p>
+           <p class="muted">A global search always looks at Name &mdash; that cannot be turned
+             off. Mark any other field searchable to have matches on it return the record too.</p>
            <table><thead><tr><th>Name</th><th>Label</th><th>Type</th><th>Required</th>
              <th>Searchable</th><th></th></tr></thead><tbody>
              ${
@@ -600,13 +601,21 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
                            )}`
                          : ''
                      }</td><td class="muted">${field.isRequired ? 'yes' : 'no'}</td>
-                     <td><form method="post" action="/admin/fields/${escapeHtml(
-                       field.id,
-                     )}/searchable" class="inline">${csrfInput(token)}
-                       ${field.isSearchable ? '' : '<input type="hidden" name="isSearchable" value="on">'}
-                       <button class="secondary" style="margin:0">${
-                         field.isSearchable ? 'Yes' : 'No'
-                       }</button></form></td>
+                     <td>${
+                       isNameField(field)
+                         ? '<span class="muted" title="Name is always searched">Always</span>'
+                         : `<form method="post" action="/admin/fields/${escapeHtml(
+                             field.id,
+                           )}/searchable" class="inline">${csrfInput(token)}
+                             ${
+                               field.isSearchable
+                                 ? ''
+                                 : '<input type="hidden" name="isSearchable" value="on">'
+                             }
+                             <button class="secondary" style="margin:0">${
+                               field.isSearchable ? 'Yes' : 'No'
+                             }</button></form>`
+                     }</td>
                      <td>${
                        field.isSystem
                          ? '<span class="muted">system</span>'

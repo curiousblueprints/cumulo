@@ -6,6 +6,7 @@ import {
   ClauseOperator,
   FieldAccess,
   FieldType,
+  isNameField,
   NAME_FIELD,
   SYSTEM_ASSIGNED_FIELD_TYPES,
   type NameFieldType,
@@ -408,7 +409,12 @@ export class MetadataService {
     });
   }
 
-  /** Turn global search on or off for one field. */
+  /**
+   * Turn global search on or off for one field.
+   *
+   * Not for Name: it is what a search looks at when nothing else is marked, so
+   * switching it off would leave a table findable by nothing at all.
+   */
   async setFieldSearchable(
     context: SecurityContext,
     fieldId: Id,
@@ -417,6 +423,9 @@ export class MetadataService {
     return this.security.asAdministrator(context, async (store) => {
       const field = await store.getField(fieldId);
       if (!field) throw new ValidationError('Field does not exist');
+      if (isNameField(field)) {
+        throw new ValidationError(`"${field.label}" is always searchable and cannot be changed`);
+      }
       const updated = await store.updateField(field.id, { isSearchable });
       if (!updated) throw new ValidationError('Field does not exist');
       return updated;

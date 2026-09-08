@@ -229,6 +229,8 @@ An auto number is handed out inside the transaction that writes the record, so
 the number and the record commit together. Each field counts on its own. It can
 be granted read-only but never editable, since nobody can write one.
 
+Name is also the field a search always looks at, which cannot be switched off.
+
 ### Deleting a field
 
 Fields can be deleted from a table's page in the console, which also removes
@@ -252,9 +254,16 @@ puts on screen is its own decision. A tab whose table the role cannot actually
 reach is simply not shown, so a tab left behind by a revoked rule stops
 appearing rather than leading somewhere forbidden.
 
-**Global search** looks at every table the user can reach. It always searches
-Name fields; any other field can be marked **searchable** on its table's page
-in setup, and matches on it will return the record too.
+**Global search** looks at every table the user can reach.
+
+Name is **always searched, and that cannot be turned off** -- it is what makes
+a table findable when nothing else is marked. Setup shows it as `Always` rather
+than a toggle, and the rule is applied when searching rather than read from the
+stored flag, so no upgrade or stray write can leave an installation whose
+search has nothing to look at.
+
+Any other field can be marked **searchable** on its table's page in setup, and
+matches on it will return the record too.
 
 Results respect everything else: candidates are narrowed in storage, then each
 one is loaded through the ordinary read path, so record-level clauses and field
@@ -287,7 +296,7 @@ and none of them owns anything.
 npm test
 ```
 
-92 tests over the adapter, the clause-logic parser, the security layer
+95 tests over the adapter, the clause-logic parser, the security layer
 (hierarchy inheritance, record filtering, per-field grants and the ceiling over
 them, namespace gating, metadata protection), lookups, tabs and global search,
 the rename migration, and the HTTP surface end to end -- the setup console as

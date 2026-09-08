@@ -2,6 +2,7 @@ import {
   AccessType,
   FieldAccess,
   FieldType,
+  isFieldSearchable,
   NAME_FIELD,
   type FieldDef,
   type Id,
@@ -412,7 +413,7 @@ export class SecurityLayer {
     for (const table of tables) {
       if (hits.length >= limit) break;
       const readable = await this.listReadableFields(context, table.id);
-      const searchable = readable.filter((field) => field.isSearchable);
+      const searchable = readable.filter(isFieldSearchable);
       if (searchable.length === 0) continue;
 
       const candidates = await this.store.findRecordIdsMatching(

@@ -184,16 +184,18 @@ test('a migration runs once, and does not undo what was decided afterwards', asy
     );
     assert.ok(std);
     const table = await app.metadata.createTable(admin, { namespaceId: std.id, name: 'Account' });
-    const name = (await app.security.listAllFields(admin, table.id)).find(
-      (field) => field.name === NAME_FIELD,
-    );
-    assert.ok(name);
+    const notes = await app.metadata.createField(admin, {
+      tableId: table.id,
+      name: 'notes',
+      type: FieldType.Text,
+      isSearchable: true,
+    });
 
     const applied = (await app.database.find(T.schemaMigration)).map((row) => String(row['id']));
     assert.ok(applied.includes('003-name-fields-are-searchable'));
 
-    // The administrator decides Name should not be searched here.
-    await app.metadata.setFieldSearchable(admin, name.id, false);
+    // The administrator decides this field should not be searched after all.
+    await app.metadata.setFieldSearchable(admin, notes.id, false);
     await app.stop();
 
     // A restart must leave that alone. Being idempotent is not the same as
@@ -201,7 +203,7 @@ test('a migration runs once, and does not undo what was decided afterwards', asy
     const again = await Application.start({ database: { driver: 'sqlite', file } });
     const context = await again.auth.authenticate('root', 'correct horse');
     const after = (await again.security.listAllFields(context, table.id)).find(
-      (field) => field.name === NAME_FIELD,
+      (field) => field.name === 'notes',
     );
     assert.equal(after?.isSearchable, false);
     assert.equal(

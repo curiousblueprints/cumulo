@@ -341,3 +341,62 @@ test('the tabs the client is given are the ones it lands on', async () => {
   assert.equal((await app.security.listTabs(admin))[0]?.name, 'Account');
   await app.stop();
 });
+
+test('Name is always searchable and cannot be switched off', async () => {
+  const { app, admin, std } = await installed();
+  const table = await app.metadata.createTable(admin, { namespaceId: std, name: 'Account' });
+  const name = await nameFieldOf(app, admin, table.id);
+  await app.records.create(admin, table.id, { name: 'Acme Industrial' });
+
+  await assert.rejects(
+    () => app.metadata.setFieldSearchable(admin, name.id, false),
+    (error: unknown) =>
+      error instanceof ValidationError && /always searchable/.test(error.message),
+  );
+  // Setting it to what it already is is refused too: there is nothing to set.
+  await assert.rejects(
+    () => app.metadata.setFieldSearchable(admin, name.id, true),
+    ValidationError,
+  );
+  assert.equal((await app.security.search(admin, 'Acme')).length, 1);
+  await app.stop();
+});
+
+test('Name stays searchable even if the stored flag says otherwise', async () => {
+  const { app, admin, std } = await installed();
+  const table = await app.metadata.createTable(admin, { namespaceId: std, name: 'Account' });
+  const name = await nameFieldOf(app, admin, table.id);
+  await app.records.create(admin, table.id, { name: 'Acme Industrial' });
+
+  // Write around the service, as a bad migration or an older release would
+  // have left it. Search must not depend on the column being right.
+  await app.database.update('field', name.id, { isSearchable: false });
+  assert.equal(
+    (await app.security.listAllFields(admin, table.id)).find((f) => f.name === 'name')
+      ?.isSearchable,
+    false,
+  );
+  assert.deepEqual(
+    (await app.security.search(admin, 'Acme')).map((hit) => hit.field.name),
+    ['name'],
+  );
+  await app.stop();
+});
+
+test('a custom field an administrator calls "name" is theirs to configure', async () => {
+  const { app, admin, std } = await installed();
+  const table = await app.metadata.createTable(admin, { namespaceId: std, name: 'Account' });
+  const other = await app.metadata.createTable(admin, { namespaceId: std, name: 'Legacy' });
+
+  // Imitate a table from before the Name field existed, carrying a field of
+  // its own called `name`: not a system field, so not locked.
+  const legacyName = await nameFieldOf(app, admin, other.id);
+  await app.database.update('field', legacyName.id, { isSystem: false });
+
+  const updated = await app.metadata.setFieldSearchable(admin, legacyName.id, false);
+  assert.equal(updated.isSearchable, false);
+  await app.records.create(admin, other.id, { name: 'Old Record' });
+  assert.deepEqual(await app.security.search(admin, 'Old Record'), []);
+  void table;
+  await app.stop();
+});

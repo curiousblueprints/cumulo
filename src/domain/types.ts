@@ -132,6 +132,28 @@ export const NAME_FIELD = 'name';
 /** What a table's Name field may be. */
 export type NameFieldType = FieldType.Text | FieldType.AutoNumber;
 
+/**
+ * A table's own Name field, which cannot be deleted and is always searched.
+ *
+ * A field an administrator happened to call `name` on some table is not this:
+ * it is theirs to configure like any other, which is why `isSystem` is part of
+ * the test.
+ */
+export function isNameField(field: FieldDef): boolean {
+  return field.isSystem && field.name === NAME_FIELD;
+}
+
+/**
+ * Whether a global search looks at this field.
+ *
+ * Name is always searched, whatever the stored flag says. Deciding it here
+ * rather than trusting the column means no upgrade, migration or stray write
+ * can leave an installation whose search has nothing to look at.
+ */
+export function isFieldSearchable(field: FieldDef): boolean {
+  return isNameField(field) || field.isSearchable;
+}
+
 /** Comparison operators available to a security rule clause. */
 export enum ClauseOperator {
   Equals = 'equals',

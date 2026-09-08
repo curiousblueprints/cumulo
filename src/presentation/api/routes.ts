@@ -1,5 +1,11 @@
 import type { Application } from '../../app/Application.js';
-import { FieldType, type FieldDef, type RecordView, type TableDef } from '../../domain/types.js';
+import {
+  isFieldSearchable,
+  FieldType,
+  type FieldDef,
+  type RecordView,
+  type TableDef,
+} from '../../domain/types.js';
 import type { SecurityContext } from '../../security/context.js';
 import { AccessDeniedError } from '../../security/errors.js';
 import type { Router } from '../http/router.js';
@@ -146,7 +152,8 @@ function describeField(field: FieldDef): {
     label: field.label,
     type: field.type,
     isRequired: field.isRequired,
-    isSearchable: field.isSearchable,
+    // The effective answer, so a client never has to know about the exception.
+    isSearchable: isFieldSearchable(field),
     referenceTableId: field.referenceTableId,
   };
 }
