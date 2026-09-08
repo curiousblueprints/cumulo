@@ -287,7 +287,7 @@ and none of them owns anything.
 npm test
 ```
 
-90 tests over the adapter, the clause-logic parser, the security layer
+92 tests over the adapter, the clause-logic parser, the security layer
 (hierarchy inheritance, record filtering, per-field grants and the ceiling over
 them, namespace gating, metadata protection), lookups, tabs and global search,
 the rename migration, and the HTTP surface end to end -- the setup console as
@@ -315,8 +315,9 @@ Recorded so they are easy to overturn:
   about emptiness itself with `isNull` / `isNotNull`.
 - **Security rules target custom tables only.** Platform metadata is not
   described as `table`/`field` rows, so only Administrator can change it.
-- `applySchema` adds columns an existing database is missing, which is enough
-  for additive changes. The one rename so far (`securityRuleField` ->
-  `securityRuleFieldGrant`) is carried forward explicitly at install time, each
-  old grant taking the level its own rule justifies.
+- `applySchema` adds columns an existing database is missing. A new column
+  arrives holding its type's zero value, which is not always right, so
+  `install()` also runs a ledger of one-time data migrations recorded in
+  `schemaMigration`. They run once rather than on every boot, so a migration
+  cannot overrule a decision made after it.
 - Sessions are in-memory, so restarting the server signs everyone out.

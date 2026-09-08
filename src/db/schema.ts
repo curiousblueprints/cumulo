@@ -11,6 +11,7 @@ import type { Schema } from './types.js';
 export const LEGACY_SECURITY_RULE_FIELD = 'securityRuleField';
 
 export const T = {
+  schemaMigration: 'schemaMigration',
   namespace: 'namespace',
   securityRole: 'securityRole',
   namespaceAccess: 'namespaceAccess',
@@ -30,6 +31,20 @@ const id = { name: 'id', type: 'text' } as const;
 const createdAt = { name: 'createdAt', type: 'text' } as const;
 
 export const PLATFORM_SCHEMA: Schema = [
+  {
+    /**
+     * Which one-time data migrations have run. `applySchema` handles tables
+     * and columns, but not the backfills that follow from adding one, and
+     * those must not run twice: a second pass would overwrite whatever an
+     * administrator has since decided.
+     */
+    name: T.schemaMigration,
+    primaryKey: 'id',
+    columns: [
+      { name: 'id', type: 'text' },
+      { name: 'appliedAt', type: 'text' },
+    ],
+  },
   {
     name: T.namespace,
     primaryKey: 'id',

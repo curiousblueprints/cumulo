@@ -298,19 +298,32 @@ table lacks (`addMissingColumns`, via `PRAGMA table_info`). SQLite needs a
 default when adding a NOT NULL column to a table that may hold rows, so each
 column type has a zero value.
 
-That covers additive change. It cannot cover a rename, so the one rename so far
-is handled explicitly: `InstallService.carryForwardFieldGrants` copies any
-`securityRuleField` rows into `securityRuleFieldGrant` and drops the legacy
-table. The old rows carried no level -- a granted field was writable exactly
-when its rule allowed writing -- so each row takes the level its own rule
-justifies: editable where the rule grants edit or create, read-only otherwise.
-That both preserves the behaviour those installations had and keeps the ceiling
-true in the data, which stamping every row `edit` would not. It runs inside
-`install()`, so it happens on boot, once, and is a no-op afterwards.
+**That zero value is the trap.** A new column arrives holding false, 0 or the
+empty string, which is not always what the code that added the column would
+have written. An upgraded installation then behaves differently from a fresh
+one, silently, in a way no test that builds its fixtures with current code will
+ever see. It has caught this project twice:
 
-This is the pattern to copy rather than the mechanism to reuse. A third or
-fourth of these wants a real migrations directory and a schema-version row,
-not more one-off methods on `InstallService`.
+- `securityRuleFieldGrant.access` arrived empty, where a carried-forward grant
+  should have taken the level its rule justified.
+- `field.isSearchable` arrived false, including on Name fields, which are
+  searchable from creation. Since global search looks at Name by default, that
+  turned search off completely on every upgraded installation.
+
+So `install()` runs a **migration ledger**: an ordered list of one-time data
+migrations, each recorded in `schemaMigration` once it has run.
+
+Running once is the point, and it is a stronger requirement than idempotence.
+Each of these migrations could be re-run without corrupting anything, but
+re-running would overwrite whatever an administrator has decided since -- turn
+Name search off and a restart would turn it back on. The ledger is what makes
+"put this right for installations that predate the column" different from
+"enforce this on every boot".
+
+Two rules for adding one. Ids are permanent: renaming one runs it again. And a
+migration should set what the code would have set at creation, not something
+convenient -- the second bug above came from stamping every carried-forward
+grant `edit` rather than asking each rule what it allowed.
 
 ## The Name field, and what is still missing
 

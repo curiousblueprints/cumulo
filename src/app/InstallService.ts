@@ -40,8 +40,7 @@ export class InstallService {
   /** Idempotent: safe to run on every boot. */
   async install(): Promise<void> {
     await this.db.applySchema(PLATFORM_SCHEMA);
-    await this.carryForwardFieldGrants();
-    await this.addMissingNameFields();
+    await this.runMigrations();
     await this.db.transaction(async () => {
       if (!(await this.store.getNamespaceByName(STD_NAMESPACE))) {
         const namespace: Namespace = {
@@ -63,6 +62,67 @@ export class InstallService {
           createdAt: nowIso(),
         };
         await this.store.insertSecurityRole(role);
+      }
+    });
+  }
+
+  /**
+   * Data migrations, in order, each run at most once.
+   *
+   * `applySchema` adds tables and columns, but a new column arrives holding
+   * its type's zero value, which is not always what the code that added it
+   * would have written. Those gaps are closed here.
+   *
+   * Once run, a migration must not run again: an administrator may since have
+   * changed what it set, and a second pass would quietly undo them. That is
+   * what the ledger is for -- being idempotent is not the same as being
+   * repeatable without harm.
+   *
+   * Ids are permanent. Rename one and it runs a second time.
+   */
+  private migrations(): { id: string; run: () => Promise<void> }[] {
+    return [
+      { id: '001-field-grants-from-legacy-table', run: () => this.carryForwardFieldGrants() },
+      { id: '002-name-field-for-existing-tables', run: () => this.addMissingNameFields() },
+      { id: '003-name-fields-are-searchable', run: () => this.makeNameFieldsSearchable() },
+    ];
+  }
+
+  private async runMigrations(): Promise<void> {
+    const applied = new Set(
+      (await this.db.find(T.schemaMigration)).map((row) => String(row['id'])),
+    );
+    for (const migration of this.migrations()) {
+      if (applied.has(migration.id)) continue;
+      await migration.run();
+      await this.db.insert(T.schemaMigration, {
+        id: migration.id,
+        appliedAt: nowIso(),
+      });
+    }
+  }
+
+  /**
+   * A table's Name field is searchable from the moment it is created, but the
+   * `isSearchable` column arrived after some of those fields did, and a column
+   * is added holding false. Installations upgraded across that point had Name
+   * fields that global search would not look at -- which, since Name is what
+   * search looks at by default, meant it found nothing at all.
+   *
+   * Only system Name fields are touched. A field an administrator created and
+   * happened to call `name` is theirs to decide about.
+   */
+  private async makeNameFieldsSearchable(): Promise<void> {
+    const stale = await this.db.find(T.field, {
+      where: [
+        { column: 'name', operator: 'eq', value: NAME_FIELD },
+        { column: 'isSystem', operator: 'eq', value: true },
+        { column: 'isSearchable', operator: 'eq', value: false },
+      ],
+    });
+    await this.db.transaction(async () => {
+      for (const row of stale) {
+        await this.db.update(T.field, row['id'] as string, { isSearchable: true });
       }
     });
   }

@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { Application } from '../src/app/Application.js';
 import { LEGACY_SECURITY_RULE_FIELD, T } from '../src/db/index.js';
+import { NAME_FIELD } from '../src/domain/types.js';
 import { AccessType, FieldAccess, FieldType, STD_NAMESPACE } from '../src/domain/types.js';
 
 /**
@@ -77,6 +78,9 @@ test('an installation predating the rename keeps its field grants', async () => 
     raw.exec(`INSERT INTO "${LEGACY_SECURITY_RULE_FIELD}"
       SELECT "id", "securityRuleId", "fieldId", "createdAt" FROM "${T.securityRuleFieldGrant}"`);
     raw.exec(`DROP TABLE "${T.securityRuleFieldGrant}"`);
+    // A genuine installation from before the rename has no ledger either --
+    // the table did not exist yet -- so forget that the migrations ran.
+    raw.exec(`DELETE FROM "${T.schemaMigration}"`);
     const legacyRows = raw.prepare(`SELECT * FROM "${LEGACY_SECURITY_RULE_FIELD}"`).all();
     assert.equal(legacyRows.length, 2);
     raw.close();
@@ -109,6 +113,102 @@ test('an installation predating the rename keeps its field grants', async () => 
     // 4. Booting again over the migrated database is a no-op.
     const again = await Application.start({ database: { driver: 'sqlite', file } });
     assert.equal((await again.database.find(T.securityRuleFieldGrant)).length, 2);
+    await again.stop();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A column added to an existing table arrives holding its type's zero value,
+ * which is not always what the code that added it would have written. For
+ * `isSearchable` on a Name field that zero was false, which turned global
+ * search off entirely on any installation upgraded across that point --
+ * search looks at Name by default, so nothing matched anything.
+ */
+test('Name fields keep searching after the isSearchable column is added', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'cumulo-searchable-'));
+  const file = join(directory, 'legacy.db');
+
+  try {
+    const app = await Application.start({ database: { driver: 'sqlite', file } });
+    const admin = await app.install.completeSetup({
+      username: 'root',
+      email: 'r@e.com',
+      password: 'correct horse',
+    });
+    const std = (await app.metadata.listNamespaces(admin)).find(
+      (namespace) => namespace.name === STD_NAMESPACE,
+    );
+    assert.ok(std);
+    const table = await app.metadata.createTable(admin, { namespaceId: std.id, name: 'Account' });
+    await app.records.create(admin, table.id, { name: 'Acme Industrial' });
+    assert.equal((await app.security.search(admin, 'Acme')).length, 1);
+    await app.stop();
+
+    // Rewind to before the column existed, and forget that the migrations ran.
+    const raw = new DatabaseSync(file);
+    raw.exec(`ALTER TABLE "${T.field}" DROP COLUMN "isSearchable"`);
+    raw.exec(`DELETE FROM "${T.schemaMigration}"`);
+    raw.close();
+
+    // Booting the current code adds the column back -- holding false -- and
+    // the migration has to put it right, or search finds nothing.
+    const upgraded = await Application.start({ database: { driver: 'sqlite', file } });
+    const context = await upgraded.auth.authenticate('root', 'correct horse');
+    const name = (await upgraded.security.listAllFields(context, table.id)).find(
+      (field) => field.name === NAME_FIELD,
+    );
+    assert.equal(name?.isSearchable, true);
+    assert.equal((await upgraded.security.search(context, 'Acme')).length, 1);
+    assert.equal((await upgraded.security.search(context, 'Acme Industrial')).length, 1);
+    await upgraded.stop();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a migration runs once, and does not undo what was decided afterwards', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'cumulo-once-'));
+  const file = join(directory, 'once.db');
+
+  try {
+    const app = await Application.start({ database: { driver: 'sqlite', file } });
+    const admin = await app.install.completeSetup({
+      username: 'root',
+      email: 'r@e.com',
+      password: 'correct horse',
+    });
+    const std = (await app.metadata.listNamespaces(admin)).find(
+      (namespace) => namespace.name === STD_NAMESPACE,
+    );
+    assert.ok(std);
+    const table = await app.metadata.createTable(admin, { namespaceId: std.id, name: 'Account' });
+    const name = (await app.security.listAllFields(admin, table.id)).find(
+      (field) => field.name === NAME_FIELD,
+    );
+    assert.ok(name);
+
+    const applied = (await app.database.find(T.schemaMigration)).map((row) => String(row['id']));
+    assert.ok(applied.includes('003-name-fields-are-searchable'));
+
+    // The administrator decides Name should not be searched here.
+    await app.metadata.setFieldSearchable(admin, name.id, false);
+    await app.stop();
+
+    // A restart must leave that alone. Being idempotent is not the same as
+    // being safe to repeat: re-running would quietly overrule them.
+    const again = await Application.start({ database: { driver: 'sqlite', file } });
+    const context = await again.auth.authenticate('root', 'correct horse');
+    const after = (await again.security.listAllFields(context, table.id)).find(
+      (field) => field.name === NAME_FIELD,
+    );
+    assert.equal(after?.isSearchable, false);
+    assert.equal(
+      (await again.database.find(T.schemaMigration)).length,
+      applied.length,
+      'no migration should have been recorded twice',
+    );
     await again.stop();
   } finally {
     rmSync(directory, { recursive: true, force: true });
