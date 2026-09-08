@@ -614,3 +614,113 @@ test('the role page orders tabs top to bottom, with up and down controls', async
   );
   await close();
 });
+
+test('a table lists its fields with an edit link and no inline controls', async () => {
+  const { app, base, close } = await serve();
+  const admin = await app.install.completeSetup({
+    username: 'root',
+    email: 'r@e.com',
+    password: 'correct horse',
+  });
+  const std = (await app.metadata.listNamespaces(admin))[0];
+  assert.ok(std);
+  const table = await app.metadata.createTable(admin, { namespaceId: std.id, name: 'Invoice' });
+  const amount = await app.metadata.createField(admin, {
+    tableId: table.id,
+    name: 'amount',
+    label: 'amount',
+    type: 'number' as never,
+  });
+
+  const client = new Client(base);
+  await client.post('/login', { username: 'root', password: 'correct horse' });
+  const tablePage = await (await client.get(`/admin/tables/${table.id}`)).text();
+
+  // Editing a field is one place now, rather than a toggle and a delete
+  // button sitting in the list.
+  assert.match(tablePage, new RegExp(`href="/admin/fields/${amount.id}"`));
+  assert.doesNotMatch(tablePage, /\/searchable"/);
+  assert.doesNotMatch(tablePage, new RegExp(`action="/admin/fields/${amount.id}/delete"`));
+  await close();
+});
+
+test('the field edit page offers everything but type, namespace and API name', async () => {
+  const { app, base, close } = await serve();
+  const admin = await app.install.completeSetup({
+    username: 'root',
+    email: 'r@e.com',
+    password: 'correct horse',
+  });
+  const std = (await app.metadata.listNamespaces(admin))[0];
+  assert.ok(std);
+  const table = await app.metadata.createTable(admin, { namespaceId: std.id, name: 'Invoice' });
+  const amount = await app.metadata.createField(admin, {
+    tableId: table.id,
+    name: 'amount',
+    label: 'amount',
+    type: 'number' as never,
+  });
+
+  const client = new Client(base);
+  await client.post('/login', { username: 'root', password: 'correct horse' });
+  const page = await (await client.get(`/admin/fields/${amount.id}`)).text();
+
+  assert.match(page, /name="label"/);
+  assert.match(page, /name="isRequired"/);
+  assert.match(page, /name="isSearchable"/);
+  // The fixed three are shown but not offered as inputs.
+  assert.doesNotMatch(page, /name="type"/);
+  assert.doesNotMatch(page, /name="namespaceId"/);
+  assert.doesNotMatch(page, /name="name"/);
+  assert.match(page, new RegExp(`action="/admin/fields/${amount.id}/delete"`));
+
+  const saved = await client.post(`/admin/fields/${amount.id}`, {
+    _csrf: csrf(page),
+    label: 'Amount due',
+    isRequired: 'on',
+    isSearchable: 'on',
+  });
+  assert.match(decodeURIComponent(saved.headers.get('location') ?? ''), /saved/);
+
+  const fields = await app.security.listAllFields(admin, table.id);
+  const updated = fields.find((field) => field.name === 'amount');
+  assert.equal(updated?.label, 'Amount due');
+  assert.equal(updated?.isRequired, true);
+  assert.equal(updated?.isSearchable, true);
+  await close();
+});
+
+test('the Name field’s page offers only a label, and no delete', async () => {
+  const { app, base, close } = await serve();
+  const admin = await app.install.completeSetup({
+    username: 'root',
+    email: 'r@e.com',
+    password: 'correct horse',
+  });
+  const std = (await app.metadata.listNamespaces(admin))[0];
+  assert.ok(std);
+  const table = await app.metadata.createTable(admin, { namespaceId: std.id, name: 'Account' });
+  const name = (await app.security.listAllFields(admin, table.id)).find(
+    (field) => field.name === 'name',
+  );
+  assert.ok(name);
+
+  const client = new Client(base);
+  await client.post('/login', { username: 'root', password: 'correct horse' });
+  const page = await (await client.get(`/admin/fields/${name.id}`)).text();
+
+  assert.match(page, /name="label"/);
+  assert.doesNotMatch(page, /name="isRequired"/);
+  assert.doesNotMatch(page, /name="isSearchable"/);
+  assert.doesNotMatch(page, /\/delete"/);
+  assert.match(page, /Only the label/);
+
+  await client.post(`/admin/fields/${name.id}`, { _csrf: csrf(page), label: 'Account Name' });
+  const after = (await app.security.listAllFields(admin, table.id)).find(
+    (field) => field.name === 'name',
+  );
+  assert.equal(after?.label, 'Account Name');
+  assert.equal(after?.isRequired, true);
+  assert.equal(after?.isSearchable, true);
+  await close();
+});

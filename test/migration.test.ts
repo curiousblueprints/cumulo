@@ -195,7 +195,7 @@ test('a migration runs once, and does not undo what was decided afterwards', asy
     assert.ok(applied.includes('003-name-fields-are-searchable'));
 
     // The administrator decides this field should not be searched after all.
-    await app.metadata.setFieldSearchable(admin, notes.id, false);
+    await app.metadata.updateField(admin, notes.id, { isSearchable: false });
     await app.stop();
 
     // A restart must leave that alone. Being idempotent is not the same as

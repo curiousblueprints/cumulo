@@ -455,6 +455,29 @@ the browser whether or not a package is installed.
 Clauses are unaffected: `securityRuleClause` points at a field by id, so it
 never had this problem to begin with.
 
+## Editing a field
+
+`MetadataService.updateField` is the only way a field changes, and it takes
+just three things: label, required, searchable. What it refuses is the
+interesting part.
+
+Type, namespace and API name are fixed because existing data is written against
+them. Values are stored per field and coerced on the way in and out, so a type
+change is a re-interpretation of every stored value, not an edit. Records are
+addressed by namespace and API name, so changing either renames the key every
+existing record was written with. A lookup's target table belongs in the same
+group -- it is what the type means, and moving it would leave every stored
+value pointing into a table it does not belong to.
+
+The Name field takes only a label. It is the field every table is guaranteed to
+have and the one a search always reads, so requiredness and searchability are
+not the administrator's to move; `isNameField` gates that, the same predicate
+that locks search and refuses deletion.
+
+An auto number cannot be made required: the platform supplies it, so requiring
+it would describe the caller's duty rather than the field's. The form omits the
+control and the service refuses it anyway, since a form is not a control.
+
 ## Deleting a field
 
 `deleteField` leans on the schema's cascades for `value` and

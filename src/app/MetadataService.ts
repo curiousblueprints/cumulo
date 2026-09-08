@@ -30,6 +30,7 @@ import type { SecurityContext } from '../security/context.js';
 import { ValidationError } from '../security/errors.js';
 import type { SecurityLayer } from '../security/SecurityLayer.js';
 import type { MetadataStore } from '../store/MetadataStore.js';
+import type { Row } from '../db/types.js';
 import { isValidApiName, newId, nowIso } from '../util/index.js';
 import { hashPassword } from './passwords.js';
 
@@ -77,6 +78,13 @@ export interface GrantResult<T> {
 export interface RuleDescription {
   rule: SecurityRule;
   grants: { field: string; access: FieldAccess }[];
+}
+
+/** What an administrator may change about an existing field. */
+export interface FieldUpdate {
+  label?: string;
+  isRequired?: boolean;
+  isSearchable?: boolean;
 }
 
 export interface UserInput {
@@ -428,23 +436,61 @@ export class MetadataService {
   }
 
   /**
-   * Turn global search on or off for one field.
+   * Change what a field can change.
    *
-   * Not for Name: it is what a search looks at when nothing else is marked, so
-   * switching it off would leave a table findable by nothing at all.
+   * Its type, namespace and API name are fixed. Those three are what existing
+   * data and existing rules are written against: values are stored per field
+   * and coerced by type, records are addressed by namespace and API name, and
+   * a clause comparing a number to a date is not a rename but a rewrite. A
+   * lookup's target table is fixed for the same reason -- it is what the type
+   * means, and moving it would leave every stored value pointing into the
+   * wrong table.
+   *
+   * The Name field is narrower still: only its label. It is the one field
+   * every table is guaranteed to have and the one a search always reads, so
+   * the rest of it is not the administrator's to move.
    */
-  async setFieldSearchable(
+  async updateField(
     context: SecurityContext,
     fieldId: Id,
-    isSearchable: boolean,
+    changes: FieldUpdate,
   ): Promise<FieldDef> {
     return this.security.asAdministrator(context, async (store) => {
       const field = await store.getField(fieldId);
       if (!field) throw new ValidationError('Field does not exist');
-      if (isNameField(field)) {
-        throw new ValidationError(`"${field.label}" is always searchable and cannot be changed`);
+
+      const patch: Row = {};
+
+      if (changes.label !== undefined) {
+        const label = changes.label.trim();
+        if (label.length === 0) throw new ValidationError('A field needs a label');
+        patch['label'] = label;
       }
-      const updated = await store.updateField(field.id, { isSearchable });
+
+      const wantsMoreThanLabel =
+        changes.isRequired !== undefined || changes.isSearchable !== undefined;
+
+      if (isNameField(field)) {
+        if (wantsMoreThanLabel) {
+          throw new ValidationError(
+            `Only the label of "${field.label}" can be changed: every table has a Name, ` +
+              'and a search always reads it',
+          );
+        }
+      } else {
+        if (changes.isRequired !== undefined) {
+          if (field.type === FieldType.AutoNumber && changes.isRequired) {
+            throw new ValidationError(
+              `"${field.label}" is filled in by the platform, so it cannot be required`,
+            );
+          }
+          patch['isRequired'] = changes.isRequired;
+        }
+        if (changes.isSearchable !== undefined) patch['isSearchable'] = changes.isSearchable;
+      }
+
+      if (Object.keys(patch).length === 0) return field;
+      const updated = await store.updateField(field.id, patch);
       if (!updated) throw new ValidationError('Field does not exist');
       return updated;
     });
@@ -683,6 +729,26 @@ export class MetadataService {
       for (const [position, other] of swapped.entries()) {
         if (other.position !== position) await store.updateRoleTabPosition(other.id, position);
       }
+    });
+  }
+
+  /**
+   * One field with the table it belongs to, for the setup console. Returns the
+   * caller's view of it, so the addressing key and namespace come along.
+   */
+  async findField(
+    context: SecurityContext,
+    fieldId: Id,
+  ): Promise<{ field: FieldView; table: TableDef } | null> {
+    return this.security.readAsAdministrator(context, async (store) => {
+      const field = await store.getField(fieldId);
+      if (!field) return null;
+      const table = await store.getTable(field.tableId);
+      if (!table) return null;
+      const view = (await this.security.listAllFields(context, table.id)).find(
+        (candidate) => candidate.id === field.id,
+      );
+      return view ? { field: view, table } : null;
     });
   }
 

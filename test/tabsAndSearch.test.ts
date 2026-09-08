@@ -200,11 +200,7 @@ test('search looks at Name without being asked, and at nothing else by default',
   // `notes` is not searchable, so a match in it returns nothing.
   assert.deepEqual(await app.security.search(admin, 'Widgets'), []);
 
-  await app.metadata.setFieldSearchable(
-    admin,
-    (await app.security.listAllFields(admin, table.id)).find((f) => f.name === 'notes')?.id ?? '',
-    true,
-  );
+  await app.metadata.updateField(admin, (await app.security.listAllFields(admin, table.id)).find((f) => f.name === 'notes')?.id ?? '', { isSearchable: true });
   const byNotes = await app.security.search(admin, 'Widgets');
   assert.deepEqual(
     byNotes.map((hit) => hit.record.id),
@@ -349,13 +345,12 @@ test('Name is always searchable and cannot be switched off', async () => {
   await app.records.create(admin, table.id, { name: 'Acme Industrial' });
 
   await assert.rejects(
-    () => app.metadata.setFieldSearchable(admin, name.id, false),
-    (error: unknown) =>
-      error instanceof ValidationError && /always searchable/.test(error.message),
+    () => app.metadata.updateField(admin, name.id, { isSearchable: false }),
+    (error: unknown) => error instanceof ValidationError && /Only the label/.test(error.message),
   );
   // Setting it to what it already is is refused too: there is nothing to set.
   await assert.rejects(
-    () => app.metadata.setFieldSearchable(admin, name.id, true),
+    () => app.metadata.updateField(admin, name.id, { isSearchable: true }),
     ValidationError,
   );
   assert.equal((await app.security.search(admin, 'Acme')).length, 1);
@@ -393,7 +388,7 @@ test('a custom field an administrator calls "name" is theirs to configure', asyn
   const legacyName = await nameFieldOf(app, admin, other.id);
   await app.database.update('field', legacyName.id, { isSystem: false });
 
-  const updated = await app.metadata.setFieldSearchable(admin, legacyName.id, false);
+  const updated = await app.metadata.updateField(admin, legacyName.id, { isSearchable: false });
   assert.equal(updated.isSearchable, false);
   await app.records.create(admin, other.id, { name: 'Old Record' });
   assert.deepEqual(await app.security.search(admin, 'Old Record'), []);

@@ -563,6 +563,110 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
     );
   });
 
+  router.get('/admin/fields/:fieldId', async (request) => {
+    const context = requireUser(request);
+    app.security.assertAdministrator(context);
+    const fieldId = request.params['fieldId'] as string;
+
+    const found = await app.metadata.findField(context, fieldId);
+    if (!found) throw new AccessDeniedError('No such field');
+    const { field, table } = found;
+    const token = request.session?.csrfToken;
+    const nameField = isNameField(field);
+    const tables = await app.metadata.listTables(context);
+
+    /** What the field is, as opposed to what can be changed about it. */
+    const facts = [
+      ['API name', `<code>${escapeHtml(field.key)}</code>`],
+      ['Namespace', `<code>${escapeHtml(field.namespaceName)}</code>`],
+      ['Type', escapeHtml(fieldTypeLabel(field.type))],
+      ...(field.referenceTableId
+        ? [
+            [
+              'Looks up',
+              escapeHtml(
+                tables.find((other) => other.id === field.referenceTableId)?.label ?? '',
+              ),
+            ],
+          ]
+        : []),
+      ['Table', escapeHtml(table.label)],
+    ];
+
+    return html(
+      page(
+        { title: field.label, context, ...messages(request) },
+        `<h1>${escapeHtml(field.label)}</h1>
+         <p class="lede"><a href="/admin/tables/${escapeHtml(table.id)}">Back to ${escapeHtml(
+           table.label,
+         )}</a></p>
+
+         <section class="card">
+           <table><tbody>
+             ${facts.map(([term, value]) => `<tr><th>${term}</th><td>${value}</td></tr>`).join('')}
+           </tbody></table>
+           <p class="muted">A field's type, namespace and API name are fixed. Records store
+             values per field and are addressed by API name, so changing one of those would not
+             rename a field but replace it${
+               field.referenceTableId
+                 ? ', and moving a lookup would leave its values pointing into the wrong table'
+                 : ''
+             }.</p>
+         </section>
+
+         <h2>Edit</h2>
+         <section class="card">
+           <form method="post" action="/admin/fields/${escapeHtml(field.id)}">${csrfInput(token)}
+             <label for="label">Label</label>
+             <input id="label" name="label" value="${escapeHtml(field.label)}" required>
+             ${
+               nameField
+                 ? `<p class="muted">Only the label can be changed here. Every table has a Name
+                      and a search always reads it, so the rest is not configurable.</p>`
+                 : `<div class="row">
+                      ${
+                        field.type === FieldType.AutoNumber
+                          ? `<div><label>Required</label>
+                               <p class="muted">An auto number is filled in by the platform,
+                                 so there is nothing to require.</p></div>`
+                          : `<div><label for="isRequired">Required</label>
+                               <select id="isRequired" name="isRequired">
+                                 <option value=""${field.isRequired ? '' : ' selected'}>No</option>
+                                 <option value="on"${
+                                   field.isRequired ? ' selected' : ''
+                                 }>Yes</option>
+                               </select></div>`
+                      }
+                      <div><label for="isSearchable">Searchable</label>
+                        <select id="isSearchable" name="isSearchable">
+                          <option value=""${field.isSearchable ? '' : ' selected'}>No</option>
+                          <option value="on"${field.isSearchable ? ' selected' : ''}>Yes</option>
+                        </select></div>
+                    </div>`
+             }
+             <button>Save</button>
+           </form>
+         </section>
+
+         ${
+           field.isSystem
+             ? `<p class="muted">This is a system field and cannot be deleted.</p>`
+             : `<h2>Delete</h2>
+                <section class="card">
+                  <p class="muted">Deleting a field removes its values from every record, and
+                    the field grants that name it. A field a security rule clause reads cannot
+                    be deleted until that rule is dealt with.</p>
+                  <form method="post" action="/admin/fields/${escapeHtml(
+                    field.id,
+                  )}/delete">${csrfInput(token)}
+                    <button class="danger">Delete this field</button>
+                  </form>
+                </section>`
+         }`,
+      ),
+    );
+  });
+
   router.get('/admin/tables/:tableId', async (request) => {
     const context = requireUser(request);
     app.security.assertAdministrator(context);
@@ -585,13 +689,13 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
          <section class="card">
            <p class="muted">A global search always looks at Name &mdash; that cannot be turned
              off. Mark any other field searchable to have matches on it return the record too.</p>
-           <table><thead><tr><th>Name</th><th>Label</th><th>Type</th><th>Required</th>
+           <table><thead><tr><th>API name</th><th>Label</th><th>Type</th><th>Required</th>
              <th>Searchable</th><th></th></tr></thead><tbody>
              ${
                fields
                  .map(
                    (field) =>
-                     `<tr><td><code>${escapeHtml(field.name)}</code></td><td>${escapeHtml(
+                     `<tr><td><code>${escapeHtml(field.key)}</code></td><td>${escapeHtml(
                        field.label,
                      )}</td><td class="muted">${escapeHtml(fieldTypeLabel(field.type))}${
                        field.referenceTableId
@@ -601,29 +705,10 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
                            )}`
                          : ''
                      }</td><td class="muted">${field.isRequired ? 'yes' : 'no'}</td>
-                     <td>${
-                       isNameField(field)
-                         ? '<span class="muted" title="Name is always searched">Always</span>'
-                         : `<form method="post" action="/admin/fields/${escapeHtml(
-                             field.id,
-                           )}/searchable" class="inline">${csrfInput(token)}
-                             ${
-                               field.isSearchable
-                                 ? ''
-                                 : '<input type="hidden" name="isSearchable" value="on">'
-                             }
-                             <button class="secondary" style="margin:0">${
-                               field.isSearchable ? 'Yes' : 'No'
-                             }</button></form>`
+                     <td class="muted">${
+                       isNameField(field) ? 'always' : field.isSearchable ? 'yes' : 'no'
                      }</td>
-                     <td>${
-                       field.isSystem
-                         ? '<span class="muted">system</span>'
-                         : `<form method="post" action="/admin/fields/${escapeHtml(
-                             field.id,
-                           )}/delete" class="inline">${csrfInput(token)}
-                              <button class="danger" style="margin:0">Delete</button></form>`
-                     }</td></tr>`,
+                     <td><a href="/admin/fields/${escapeHtml(field.id)}">Edit</a></td></tr>`,
                  )
                  .join('') || '<tr><td colspan="6" class="muted">No fields yet.</td></tr>'
              }
@@ -799,16 +884,27 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
   );
 
   router.post(
-    '/admin/fields/:fieldId/searchable',
+    '/admin/fields/:fieldId',
     adminAction(async (request, context) => {
-      const field = await app.metadata.setFieldSearchable(
-        context,
-        request.params['fieldId'] ?? '',
-        request.body['isSearchable'] === 'on',
+      const fieldId = request.params['fieldId'] ?? '';
+      const found = await app.metadata.findField(context, fieldId);
+      if (!found) throw new AccessDeniedError('No such field');
+
+      // The Name field's form offers only a label, so only a label is sent.
+      const changes = isNameField(found.field)
+        ? { label: request.body['label'] ?? '' }
+        : {
+            label: request.body['label'] ?? '',
+            isSearchable: request.body['isSearchable'] === 'on',
+            ...(found.field.type === FieldType.AutoNumber
+              ? {}
+              : { isRequired: request.body['isRequired'] === 'on' }),
+          };
+
+      const field = await app.metadata.updateField(context, fieldId, changes);
+      throw new RedirectSignal(
+        withMessage(`/admin/fields/${field.id}`, 'notice', `"${field.label}" saved`),
       );
-      return field.isSearchable
-        ? `"${field.label}" is now searchable`
-        : `"${field.label}" is no longer searchable`;
     }),
   );
 
@@ -905,8 +1001,15 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
   router.post(
     '/admin/fields/:fieldId/delete',
     adminAction(async (request, context) => {
+      const found = await app.metadata.findField(context, request.params['fieldId'] ?? '');
       await app.metadata.deleteField(context, request.params['fieldId'] ?? '');
-      return 'Field deleted';
+      throw new RedirectSignal(
+        withMessage(
+          found ? `/admin/tables/${found.table.id}` : '/admin',
+          'notice',
+          `"${found?.field.label ?? 'Field'}" deleted`,
+        ),
+      );
     }),
   );
 

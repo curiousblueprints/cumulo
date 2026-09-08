@@ -136,7 +136,7 @@ test('a packaged field is addressed by a qualified name', async () => {
   // And search reports the field that actually matched.
   const searchable = fields.find((field) => field.key === 'acme.status');
   assert.ok(searchable);
-  await app.metadata.setFieldSearchable(admin, searchable.id, true);
+  await app.metadata.updateField(admin, searchable.id, { isSearchable: true });
   const hits = await app.security.search(admin, 'changed');
   assert.deepEqual(
     hits.map((hit) => [hit.field.key, hit.value]),

@@ -254,15 +254,26 @@ be granted read-only but never editable, since nobody can write one.
 
 Name is also the field a search always looks at, which cannot be switched off.
 
-### Deleting a field
+### Editing and deleting a field
 
-Fields can be deleted from a table's page in the console, which also removes
-their values and their field grants. Two are refused:
+Each field on a table's page in setup has an **Edit** link. From there its
+label, whether it is required, and whether it is searchable can all be changed,
+and it can be deleted.
 
-- The **Name** field, which is a system field.
-- A field a **security rule clause reads**. Dropping a clause from underneath a
-  rule would silently widen what that rule matches, so the rule has to be dealt
-  with first. The error names the rule.
+Three things are fixed: the **type**, the **namespace** and the **API name**.
+Values are stored per field and coerced by type, records are addressed by
+namespace and API name, and a lookup's target table is what its type means --
+changing any of them would not rename a field but replace it, leaving existing
+values behind. The edit page shows them, and says so.
+
+The **Name** field is narrower again: its label, and nothing else. Every table
+has a Name and a search always reads it, so the rest of it is not the
+administrator's to move, and it cannot be deleted.
+
+Deleting a field removes its values from every record and the field grants that
+name it. One deletion is refused: a field a **security rule clause reads**.
+Dropping a clause from underneath a rule would silently widen what that rule
+matches, so the rule has to be dealt with first, and the error names it.
 
 ## Tabs and global search
 
@@ -338,7 +349,7 @@ through it.
 npm test
 ```
 
-107 tests over the adapter, the clause-logic parser, the security layer
+116 tests over the adapter, the clause-logic parser, the security layer
 (hierarchy inheritance, record filtering, per-field grants and the ceiling over
 them, namespace gating, metadata protection), lookups, tabs and global search,
 the rename migration, and the HTTP surface end to end -- the setup console as
