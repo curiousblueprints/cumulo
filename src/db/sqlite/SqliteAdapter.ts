@@ -134,6 +134,10 @@ export class SqliteAdapter implements DatabaseAdapter {
     return rows.length > 0;
   }
 
+  async dropIndex(name: string): Promise<void> {
+    this.handle().exec(`DROP INDEX IF EXISTS ${quote(name)}`);
+  }
+
   async dropTable(table: string): Promise<void> {
     this.handle().exec(`DROP TABLE IF EXISTS ${quote(table)}`);
     this.columnTypes.delete(table);

@@ -57,7 +57,7 @@ async function loadLookups(
 
 /** A record's stand-in name: its Name, or the first value that will do. */
 export function recordLabel(record: RecordSummary, fields: FieldSummary[]): string {
-  const named = fields.find((field) => field.name === 'name');
+  const named = fields.find((field) => field.apiName === 'name');
   const ordered = named ? [named, ...fields.filter((field) => field !== named)] : fields;
   for (const field of ordered) {
     if (field.type === 'reference') continue;

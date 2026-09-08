@@ -10,6 +10,13 @@ import type { Schema } from './types.js';
  */
 export const LEGACY_SECURITY_RULE_FIELD = 'securityRuleField';
 
+/**
+ * A unique index that briefly held field API names to one per table, ignoring
+ * the namespace. Too strict -- two packages may each contribute a `status` --
+ * so it is dropped by migration.
+ */
+export const LEGACY_FIELD_NAME_INDEX = 'uniq_field_tableId_name';
+
 export const T = {
   schemaMigration: 'schemaMigration',
   namespace: 'namespace',
@@ -158,12 +165,16 @@ export const PLATFORM_SCHEMA: Schema = [
       createdAt,
     ],
     /**
-     * An API name identifies a field on its table, whatever namespace added
-     * it: two packages cannot both contribute a `status` to the same table,
-     * and nothing can contribute a second `name`. Expressed as an index so
-     * the rule also reaches databases created before it.
+     * An API name identifies a field within its namespace on its table. Two
+     * packages may each contribute a `status` -- that is what namespaces are
+     * for -- but neither may contribute two. `name` is reserved separately,
+     * in the application layer, because it is reserved across every namespace
+     * and so is not a uniqueness rule at all.
+     *
+     * Expressed as an index rather than a table constraint so the rule also
+     * reaches databases created before it.
      */
-    uniqueIndexes: [['tableId', 'name']],
+    uniqueIndexes: [['tableId', 'namespaceId', 'name']],
     indexes: [['tableId']],
   },
   {

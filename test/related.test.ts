@@ -36,13 +36,45 @@ async function nameFieldOf(app: Application, admin: SecurityContext, tableId: Id
 
 // --- API names are unique on a table -------------------------------------
 
-test('an API name identifies a field on its table, whatever the namespace', async () => {
+test('an API name identifies a field within its namespace on a table', async () => {
+  const { app, admin, std } = await installed();
+  const acme = await app.metadata.createNamespace(admin, { name: 'acme' });
+  const zeta = await app.metadata.createNamespace(admin, { name: 'zeta' });
+  const table = await app.metadata.createTable(admin, { namespaceId: std, name: 'Account' });
+
+  // Two packages may each contribute a `status`. That is what namespaces are
+  // for -- neither knows the other exists.
+  for (const namespaceId of [std, acme.id, zeta.id]) {
+    const created = await app.metadata.createField(admin, {
+      tableId: table.id,
+      name: 'status',
+      type: FieldType.Text,
+      namespaceId,
+    });
+    assert.equal(created.name, 'status');
+  }
+  // But neither may contribute two.
+  await assert.rejects(
+    () =>
+      app.metadata.createField(admin, {
+        tableId: table.id,
+        name: 'status',
+        type: FieldType.Text,
+        namespaceId: acme.id,
+      }),
+    (error: unknown) =>
+      error instanceof ValidationError && /already the API name .* in acme/.test(error.message),
+  );
+  await app.stop();
+});
+
+test('"name" is reserved across every namespace', async () => {
   const { app, admin, std } = await installed();
   const acme = await app.metadata.createNamespace(admin, { name: 'acme' });
   const table = await app.metadata.createTable(admin, { namespaceId: std, name: 'Account' });
 
-  // `name` belongs to the table's own Name field and cannot be claimed again,
-  // by this namespace or any other. A label is beside the point.
+  // Not a uniqueness rule: no package may contribute a `name` under its own
+  // namespace either, and the label is beside the point.
   for (const namespaceId of [std, acme.id]) {
     await assert.rejects(
       () =>
@@ -53,39 +85,62 @@ test('an API name identifies a field on its table, whatever the namespace', asyn
           type: FieldType.Text,
           namespaceId,
         }),
-      (error: unknown) =>
-        error instanceof ValidationError && /already the API name/.test(error.message),
+      (error: unknown) => error instanceof ValidationError && /reserved/.test(error.message),
     );
   }
 
+  // The standard Name field sits in the table's own namespace.
+  const name = await nameFieldOf(app, admin, table.id);
+  assert.equal(name.namespaceId, std);
+  assert.equal(name.key, 'name');
+  await app.stop();
+});
+
+test('a packaged field is addressed by a qualified name', async () => {
+  const { app, admin, std } = await installed();
+  const acme = await app.metadata.createNamespace(admin, { name: 'acme' });
+  const table = await app.metadata.createTable(admin, { namespaceId: std, name: 'Account' });
   await app.metadata.createField(admin, {
     tableId: table.id,
     name: 'status',
     type: FieldType.Text,
   });
-  // Two packages cannot both contribute a `status` to the same table either.
-  await assert.rejects(
-    () =>
-      app.metadata.createField(admin, {
-        tableId: table.id,
-        name: 'status',
-        type: FieldType.Text,
-        namespaceId: acme.id,
-      }),
-    ValidationError,
-  );
-
-  // A different table is a different scope.
-  const other = await app.metadata.createTable(admin, { namespaceId: std, name: 'Contact' });
-  const created = await app.metadata.createField(admin, {
-    tableId: other.id,
+  await app.metadata.createField(admin, {
+    tableId: table.id,
     name: 'status',
     type: FieldType.Text,
+    namespaceId: acme.id,
   });
-  assert.equal(created.name, 'status');
+
+  // The table's own field keeps the bare name; the package's is qualified, so
+  // the two do not collide on a record.
+  const fields = await app.security.listAllFields(admin, table.id);
   assert.deepEqual(
-    (await app.security.listAllFields(admin, table.id)).map((field) => field.name).sort(),
-    ['name', 'status'],
+    fields.map((field) => field.key).sort(),
+    ['acme.status', 'name', 'status'],
+  );
+
+  const record = await app.records.create(admin, table.id, {
+    name: 'Acme',
+    status: 'ours',
+    'acme.status': 'theirs',
+  });
+  assert.equal(record.values['status'], 'ours');
+  assert.equal(record.values['acme.status'], 'theirs');
+
+  // Each is written independently of the other.
+  const updated = await app.records.update(admin, record.id, { 'acme.status': 'changed' });
+  assert.equal(updated.values['status'], 'ours');
+  assert.equal(updated.values['acme.status'], 'changed');
+
+  // And search reports the field that actually matched.
+  const searchable = fields.find((field) => field.key === 'acme.status');
+  assert.ok(searchable);
+  await app.metadata.setFieldSearchable(admin, searchable.id, true);
+  const hits = await app.security.search(admin, 'changed');
+  assert.deepEqual(
+    hits.map((hit) => [hit.field.key, hit.value]),
+    [['acme.status', 'changed']],
   );
   await app.stop();
 });

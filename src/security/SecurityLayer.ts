@@ -1,10 +1,12 @@
 import {
   AccessType,
+  fieldKey,
   FieldAccess,
   FieldType,
   isFieldSearchable,
-  NAME_FIELD,
+  isNameField,
   type FieldDef,
+  type FieldView,
   type Id,
   type Namespace,
   type RecordRow,
@@ -35,9 +37,9 @@ export interface QueryOptions {
 export interface RelatedList {
   table: TableDef;
   /** The lookup on the child table that points at the record being viewed. */
-  field: FieldDef;
+  field: FieldView;
   title: string;
-  columns: FieldDef[];
+  columns: FieldView[];
   records: RecordView[];
   canCreate: boolean;
 }
@@ -48,7 +50,7 @@ export interface SearchHit {
   table: TableDef;
   /** How the record reads in a list -- its Name where the caller can see it. */
   label: string;
-  field: FieldDef;
+  field: FieldView;
   value: string;
 }
 
@@ -62,9 +64,41 @@ export interface SearchHit {
  */
 export class SecurityLayer {
   private readonly resolver: PermissionResolver;
+  /** Namespace names, for building field keys. Derived from metadata, so it
+   *  is dropped whenever the permission cache is. */
+  private namespaceNames: Map<Id, string> | null = null;
 
   constructor(private readonly store: MetadataStore) {
     this.resolver = new PermissionResolver(store);
+  }
+
+  private async namespaceName(id: Id): Promise<string> {
+    if (!this.namespaceNames) {
+      this.namespaceNames = new Map(
+        (await this.store.listNamespaces()).map((namespace) => [namespace.id, namespace.name]),
+      );
+    }
+    return this.namespaceNames.get(id) ?? '';
+  }
+
+  /** Attach each field's addressing key, which depends on its table. */
+  private async asViews(table: TableDef, fields: FieldDef[]): Promise<FieldView[]> {
+    const views: FieldView[] = [];
+    for (const field of fields) {
+      const namespaceName = await this.namespaceName(field.namespaceId);
+      views.push({
+        ...field,
+        namespaceName,
+        key: fieldKey(field, table.namespaceId, namespaceName),
+      });
+    }
+    return views;
+  }
+
+  private async viewsForTable(tableId: Id, fields: FieldDef[]): Promise<FieldView[]> {
+    const table = await this.store.getTable(tableId);
+    if (!table) throw new NotFoundError(`No such table: ${tableId}`);
+    return this.asViews(table, fields);
   }
 
   permissions(context: SecurityContext): Promise<PermissionSet> {
@@ -84,8 +118,10 @@ export class SecurityLayer {
   ): Promise<T> {
     this.assertAdministrator(context);
     const result = await this.store.transaction(() => action(this.store));
-    // Permissions are derived from metadata, so any change invalidates them.
+    // Permissions and field keys are both derived from metadata, so any change
+    // invalidates them.
     this.resolver.invalidate();
+    this.namespaceNames = null;
     return result;
   }
 
@@ -150,21 +186,24 @@ export class SecurityLayer {
   }
 
   /** Fields the user may see at all, i.e. named by some rule granting read. */
-  async listReadableFields(context: SecurityContext, tableId: Id): Promise<FieldDef[]> {
+  async listReadableFields(context: SecurityContext, tableId: Id): Promise<FieldView[]> {
     const permissions = await this.permissions(context);
     const fields = await this.store.listFields(tableId);
-    if (permissions.isAdministrator) return fields;
+    if (permissions.isAdministrator) return this.viewsForTable(tableId, fields);
     const allowed = grantedFieldIds(
       rulesGranting(permissions, tableId, AccessType.Read),
       FieldAccess.Read,
     );
-    return fields.filter((field) => allowed.has(field.id));
+    return this.viewsForTable(
+      tableId,
+      fields.filter((field) => allowed.has(field.id)),
+    );
   }
 
   /** Every field on the table, regardless of access. Administrators only. */
-  async listAllFields(context: SecurityContext, tableId: Id): Promise<FieldDef[]> {
+  async listAllFields(context: SecurityContext, tableId: Id): Promise<FieldView[]> {
     this.assertAdministrator(context);
-    return this.store.listFields(tableId);
+    return this.viewsForTable(tableId, await this.store.listFields(tableId));
   }
 
   // --- record operations -------------------------------------------------
@@ -176,7 +215,7 @@ export class SecurityLayer {
   ): Promise<RecordView[]> {
     const permissions = await this.permissions(context);
     const table = await this.requireTable(permissions, tableId);
-    const fields = await this.fieldMap(table.id);
+    const fields = await this.fieldMap(table);
 
     const records = await this.store.listRecords(table.id, options.limit, options.offset);
     const values = await this.valuesByRecord(records.map((record) => record.id));
@@ -210,7 +249,7 @@ export class SecurityLayer {
     const permissions = await this.permissions(context);
     const record = await this.requireRecord(recordId);
     const table = await this.requireTable(permissions, record.tableId);
-    const fields = await this.fieldMap(table.id);
+    const fields = await this.fieldMap(table);
     const values = (await this.valuesByRecord([record.id])).get(record.id) ?? new Map();
 
     if (permissions.isAdministrator) return this.project(record, values, fields, null);
@@ -236,7 +275,7 @@ export class SecurityLayer {
   ): Promise<RecordView> {
     const permissions = await this.permissions(context);
     const table = await this.requireTable(permissions, tableId);
-    const fields = await this.fieldMap(table.id);
+    const fields = await this.fieldMap(table);
     const byName = nameIndex(fields);
 
     // Permission first, then validation. Answering "that field is required"
@@ -306,7 +345,7 @@ export class SecurityLayer {
     const permissions = await this.permissions(context);
     const record = await this.requireRecord(recordId);
     const table = await this.requireTable(permissions, record.tableId);
-    const fields = await this.fieldMap(table.id);
+    const fields = await this.fieldMap(table);
     const byName = nameIndex(fields);
     const current = (await this.valuesByRecord([record.id])).get(record.id) ?? new Map();
 
@@ -365,7 +404,7 @@ export class SecurityLayer {
     const permissions = await this.permissions(context);
     const record = await this.requireRecord(recordId);
     const table = await this.requireTable(permissions, record.tableId);
-    const fields = await this.fieldMap(table.id);
+    const fields = await this.fieldMap(table);
     const values = (await this.valuesByRecord([record.id])).get(record.id) ?? new Map();
 
     if (!permissions.isAdministrator) {
@@ -444,7 +483,9 @@ export class SecurityLayer {
       if (!childTable) continue;
 
       const readable = await this.listReadableFields(context, childTable.id);
-      if (!readable.some((field) => field.id === lookup.id)) continue;
+      // The caller's view of the lookup, which carries how it is addressed.
+      const lookupView = readable.find((field) => field.id === lookup.id);
+      if (!lookupView) continue;
 
       const candidates = await this.store.findRecordIdsByFieldValue(
         lookup.id,
@@ -463,7 +504,7 @@ export class SecurityLayer {
 
       lists.push({
         table: childTable,
-        field: lookup,
+        field: lookupView,
         title:
           (perTable.get(lookup.tableId) ?? 0) > 1
             ? `${childTable.label} (${lookup.label})`
@@ -519,7 +560,7 @@ export class SecurityLayer {
           continue;
         }
         const matched = searchable.find((field) => {
-          const value = record.values[field.name];
+          const value = record.values[field.key];
           return (
             value !== null &&
             value !== undefined &&
@@ -532,7 +573,7 @@ export class SecurityLayer {
           table,
           label: recordLabel(record, readable),
           field: matched,
-          value: String(record.values[matched.name] ?? ''),
+          value: String(record.values[matched.key] ?? ''),
         });
       }
     }
@@ -549,14 +590,14 @@ export class SecurityLayer {
   }
 
   /** Fields the user may set when creating a record in this table. */
-  async listCreatableFields(context: SecurityContext, tableId: Id): Promise<FieldDef[]> {
+  async listCreatableFields(context: SecurityContext, tableId: Id): Promise<FieldView[]> {
     return this.grantedFields(context, tableId, (permissions) =>
       rulesGrantingCreate(permissions, tableId),
     );
   }
 
   /** Fields the user may write when editing a record in this table. */
-  async listEditableFields(context: SecurityContext, tableId: Id): Promise<FieldDef[]> {
+  async listEditableFields(context: SecurityContext, tableId: Id): Promise<FieldView[]> {
     return this.grantedFields(context, tableId, (permissions) =>
       rulesGranting(permissions, tableId, AccessType.Edit),
     );
@@ -566,16 +607,19 @@ export class SecurityLayer {
     context: SecurityContext,
     tableId: Id,
     select: (permissions: PermissionSet) => CompiledRule[],
-  ): Promise<FieldDef[]> {
+  ): Promise<FieldView[]> {
     const permissions = await this.permissions(context);
     // A field the platform fills in is writable by nobody, administrator
     // included, so it never appears in a list of what may be written.
     const fields = (await this.store.listFields(tableId)).filter(
       (field) => !isSystemAssigned(field),
     );
-    if (permissions.isAdministrator) return fields;
+    if (permissions.isAdministrator) return this.viewsForTable(tableId, fields);
     const granted = grantedFieldIds(select(permissions), FieldAccess.Edit);
-    return fields.filter((field) => granted.has(field.id));
+    return this.viewsForTable(
+      tableId,
+      fields.filter((field) => granted.has(field.id)),
+    );
   }
 
   /**
@@ -617,9 +661,9 @@ export class SecurityLayer {
     return record;
   }
 
-  private async fieldMap(tableId: Id): Promise<Map<Id, FieldDef>> {
-    const fields = await this.store.listFields(tableId);
-    return new Map(fields.map((field) => [field.id, field]));
+  private async fieldMap(table: TableDef): Promise<Map<Id, FieldView>> {
+    const views = await this.asViews(table, await this.store.listFields(table.id));
+    return new Map(views.map((field) => [field.id, field]));
   }
 
   private async valuesByRecord(recordIds: Id[]): Promise<Map<Id, Map<Id, string | null>>> {
@@ -658,12 +702,12 @@ export class SecurityLayer {
 
   private normalizeInput(
     input: Record<string, unknown>,
-    byName: Map<string, FieldDef>,
+    byKey: Map<string, FieldView>,
   ): Map<Id, string | null> {
     const stored = new Map<Id, string | null>();
-    for (const [name, raw] of Object.entries(input)) {
-      const field = byName.get(name);
-      if (!field) throw new ValidationError(`Unknown field: "${name}"`);
+    for (const [key, raw] of Object.entries(input)) {
+      const field = byKey.get(key);
+      if (!field) throw new ValidationError(`Unknown field: "${key}"`);
       stored.set(field.id, toStoredValue(field, raw));
     }
     return stored;
@@ -724,13 +768,13 @@ export class SecurityLayer {
   private project(
     record: RecordRow,
     values: ValueMap,
-    fields: ReadonlyMap<Id, FieldDef>,
+    fields: ReadonlyMap<Id, FieldView>,
     visibleFields: ReadonlySet<Id> | null,
   ): RecordView {
     const projected: Record<string, unknown> = {};
     for (const field of fields.values()) {
       if (visibleFields && !visibleFields.has(field.id)) continue;
-      projected[field.name] = fromStoredValue(field, values.get(field.id) ?? null);
+      projected[field.key] = fromStoredValue(field, values.get(field.id) ?? null);
     }
     return {
       id: record.id,
@@ -747,12 +791,12 @@ export class SecurityLayer {
  * will do, or its id. Computed here rather than in the client because only
  * this layer knows which fields the caller may actually read.
  */
-function recordLabel(record: RecordView, fields: FieldDef[]): string {
-  const named = fields.find((field) => field.name === NAME_FIELD);
+function recordLabel(record: RecordView, fields: FieldView[]): string {
+  const named = fields.find((field) => isNameField(field));
   const ordered = named ? [named, ...fields.filter((field) => field !== named)] : fields;
   for (const field of ordered) {
     if (field.type === FieldType.Reference) continue;
-    const value = record.values[field.name];
+    const value = record.values[field.key];
     if (value !== null && value !== undefined && String(value) !== '') {
       return labelForValue(field, value);
     }
@@ -760,6 +804,6 @@ function recordLabel(record: RecordView, fields: FieldDef[]): string {
   return record.id.slice(0, 8);
 }
 
-function nameIndex(fields: ReadonlyMap<Id, FieldDef>): Map<string, FieldDef> {
-  return new Map([...fields.values()].map((field) => [field.name, field]));
+function nameIndex(fields: ReadonlyMap<Id, FieldView>): Map<string, FieldView> {
+  return new Map([...fields.values()].map((field) => [field.key, field]));
 }

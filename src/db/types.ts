@@ -91,6 +91,9 @@ export interface DatabaseAdapter {
   /** Whether a table exists, for carrying an older installation forward. */
   hasTable(table: string): Promise<boolean>;
 
+  /** Remove an index by name. Used only by migrations. */
+  dropIndex(name: string): Promise<void>;
+
   /** Remove a table and everything in it. Used only by migrations. */
   dropTable(table: string): Promise<void>;
 

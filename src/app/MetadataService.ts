@@ -12,6 +12,7 @@ import {
   type NameFieldType,
   UNARY_OPERATORS,
   type FieldDef,
+  type FieldView,
   type Id,
   type Namespace,
   type NamespaceAccess,
@@ -350,13 +351,25 @@ export class MetadataService {
         throw new ValidationError('Only lookup fields may name a looked-up table');
       }
 
-      // An API name identifies a field on its table, regardless of which
-      // namespace is adding it -- which is also what stops anything claiming
-      // the `name` the table was created with.
-      const existing = await store.listFields(table.id);
-      if (existing.some((field) => field.name === name)) {
+      // `name` belongs to the table's own Name field, in the table's own
+      // namespace. It is reserved everywhere: a package cannot contribute one
+      // under its own namespace either, because a record's values are keyed by
+      // API name and two `name`s could not both be that key.
+      if (name === NAME_FIELD) {
         throw new ValidationError(
-          `"${name}" is already the API name of a field on ${table.name}`,
+          `"${NAME_FIELD}" is reserved for the table's own Name field and cannot be reused`,
+        );
+      }
+
+      // Otherwise an API name identifies a field within its namespace. Two
+      // packages may each contribute a `status`; neither may contribute two.
+      const existing = await store.listFields(table.id);
+      if (existing.some((field) => field.name === name && field.namespaceId === namespaceId)) {
+        const owner = await store.getNamespace(namespaceId);
+        throw new ValidationError(
+          `"${name}" is already the API name of a field on ${table.name} in ${
+            owner?.name ?? 'that namespace'
+          }`,
         );
       }
 
@@ -707,7 +720,7 @@ export class MetadataService {
     return this.security.listTables(context);
   }
 
-  listReadableFields(context: SecurityContext, tableId: Id): Promise<FieldDef[]> {
+  listReadableFields(context: SecurityContext, tableId: Id): Promise<FieldView[]> {
     return this.security.listReadableFields(context, tableId);
   }
 

@@ -7,7 +7,12 @@ export interface TableSummary {
 
 export interface FieldSummary {
   id: string;
+  /** How the field is addressed in `RecordSummary.values` and in write input.
+   *  Qualified with a namespace when a package contributed the field. */
   name: string;
+  /** The unqualified API name, for showing in setup-style contexts. */
+  apiName: string;
+  namespace: string;
   label: string;
   type: string;
   isRequired: boolean;

@@ -1,4 +1,9 @@
-import { LEGACY_SECURITY_RULE_FIELD, PLATFORM_SCHEMA, T } from '../db/schema.js';
+import {
+  LEGACY_FIELD_NAME_INDEX,
+  LEGACY_SECURITY_RULE_FIELD,
+  PLATFORM_SCHEMA,
+  T,
+} from '../db/schema.js';
 import type { DatabaseAdapter } from '../db/types.js';
 import {
   AccessType,
@@ -85,6 +90,10 @@ export class InstallService {
       { id: '001-field-grants-from-legacy-table', run: () => this.carryForwardFieldGrants() },
       { id: '002-name-field-for-existing-tables', run: () => this.addMissingNameFields() },
       { id: '003-name-fields-are-searchable', run: () => this.makeNameFieldsSearchable() },
+      {
+        id: '004-field-names-unique-per-namespace',
+        run: () => this.db.dropIndex(LEGACY_FIELD_NAME_INDEX),
+      },
     ];
   }
 

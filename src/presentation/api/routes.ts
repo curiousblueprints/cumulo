@@ -2,7 +2,7 @@ import type { Application } from '../../app/Application.js';
 import {
   isFieldSearchable,
   FieldType,
-  type FieldDef,
+  type FieldView,
   type RecordView,
   type TableDef,
 } from '../../domain/types.js';
@@ -58,8 +58,8 @@ export function registerApiRoutes(router: Router, app: Application): void {
     return json({
       table: describeTable(table),
       fields: readable.map(describeField),
-      creatableFields: creatable.map((field) => field.name),
-      editableFields: editable.map((field) => field.name),
+      creatableFields: creatable.map((field) => field.key),
+      editableFields: editable.map((field) => field.key),
       canCreate,
     });
   });
@@ -93,7 +93,7 @@ export function registerApiRoutes(router: Router, app: Application): void {
       record: describeRecord(record),
       table: describeTable(table),
       fields: readable.map(describeField),
-      editableFields: editable.map((field) => field.name),
+      editableFields: editable.map((field) => field.key),
     });
   });
 
@@ -159,9 +159,11 @@ function describeTable(table: TableDef): {
   return { id: table.id, name: table.name, label: table.label };
 }
 
-function describeField(field: FieldDef): {
+function describeField(field: FieldView): {
   id: string;
   name: string;
+  apiName: string;
+  namespace: string;
   label: string;
   type: FieldType;
   isRequired: boolean;
@@ -170,7 +172,12 @@ function describeField(field: FieldDef): {
 } {
   return {
     id: field.id,
-    name: field.name,
+    // `name` is how the field is addressed in a record's values and in write
+    // input, which is qualified when a package contributed it. A client keys
+    // off this and never has to know a namespace exists.
+    name: field.key,
+    apiName: field.name,
+    namespace: field.namespaceName,
     label: field.label,
     type: field.type,
     isRequired: field.isRequired,

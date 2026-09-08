@@ -130,7 +130,7 @@ tables be defined at runtime.
 | `namespaceAccess` | Which roles may reach which non-`std` namespaces. |
 | `users` | Users, each with exactly one security role. |
 | `table` | Logical tables ("objects"), owned by a namespace. |
-| `field` | Fields on a table, with a type and an owning namespace. An API name is unique on its table, whichever namespace adds it. |
+| `field` | Fields on a table, with a type and an owning namespace. An API name is unique per namespace on a table; `name` is reserved everywhere. |
 | `securityRule` | Access types, create, and clause matching, for one table. |
 | `securityRuleClause` | The predicates deciding which records a rule covers. |
 | `securityRuleFieldGrant` | The fields a rule exposes when it applies, each read-only or editable. |
@@ -204,6 +204,29 @@ Those are always returned and always visible, but they are not `field` rows, so
 they cannot be granted and a rule clause cannot refer to them. Ownership is
 therefore something you build: a field holding a user id, and a clause
 comparing it to `$user.id`.
+
+### API names and namespaces
+
+A field's API name is unique **within its namespace** on a table. Two packages
+may each contribute a `status` -- that is what namespaces are for -- but
+neither may contribute two.
+
+`name` is the exception, and not a uniqueness rule: it is reserved across every
+namespace, because a record's values are keyed by API name and two `name`s
+could not both be that key. The table's own Name field lives in the table's own
+namespace.
+
+Because two fields can share an API name, a record addresses them by a
+**qualified key**: the bare name for the table's own namespace, and
+`namespace.name` for anything a package contributed.
+
+```jsonc
+{ "name": "Acme", "status": "ours", "acme.status": "theirs" }
+```
+
+The API reports that key as a field's `name`, so a client reads and writes
+records without needing to know a namespace exists; the unqualified name is
+there as `apiName` for places that show metadata.
 
 ### Field types
 
@@ -315,7 +338,7 @@ through it.
 npm test
 ```
 
-104 tests over the adapter, the clause-logic parser, the security layer
+107 tests over the adapter, the clause-logic parser, the security layer
 (hierarchy inheritance, record filtering, per-field grants and the ceiling over
 them, namespace gating, metadata protection), lookups, tabs and global search,
 the rename migration, and the HTTP surface end to end -- the setup console as

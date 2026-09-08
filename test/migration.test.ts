@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { Application } from '../src/app/Application.js';
-import { LEGACY_SECURITY_RULE_FIELD, T } from '../src/db/index.js';
+import { LEGACY_FIELD_NAME_INDEX, LEGACY_SECURITY_RULE_FIELD, T } from '../src/db/index.js';
 import { NAME_FIELD } from '../src/domain/types.js';
 import { AccessType, FieldAccess, FieldType, STD_NAMESPACE } from '../src/domain/types.js';
 
@@ -212,6 +212,56 @@ test('a migration runs once, and does not undo what was decided afterwards', asy
       'no migration should have been recorded twice',
     );
     await again.stop();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('the over-strict field name index is dropped on upgrade', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'cumulo-fieldname-'));
+  const file = join(directory, 'strict.db');
+
+  try {
+    const app = await Application.start({ database: { driver: 'sqlite', file } });
+    const admin = await app.install.completeSetup({
+      username: 'root',
+      email: 'r@e.com',
+      password: 'correct horse',
+    });
+    const std = (await app.metadata.listNamespaces(admin)).find(
+      (namespace) => namespace.name === STD_NAMESPACE,
+    );
+    assert.ok(std);
+    const acme = await app.metadata.createNamespace(admin, { name: 'acme' });
+    const table = await app.metadata.createTable(admin, { namespaceId: std.id, name: 'Account' });
+    await app.stop();
+
+    // Put back the index that briefly held field names to one per table,
+    // ignoring the namespace, and forget that the migration ran.
+    const raw = new DatabaseSync(file);
+    raw.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS "${LEGACY_FIELD_NAME_INDEX}" ` +
+        `ON "${T.field}" ("tableId", "name")`,
+    );
+    raw.exec(`DELETE FROM "${T.schemaMigration}" WHERE id = '004-field-names-unique-per-namespace'`);
+    raw.close();
+
+    const upgraded = await Application.start({ database: { driver: 'sqlite', file } });
+    const context = await upgraded.auth.authenticate('root', 'correct horse');
+    // Two packages contributing a `status` is the case the old index forbade.
+    for (const namespaceId of [std.id, acme.id]) {
+      await upgraded.metadata.createField(context, {
+        tableId: table.id,
+        name: 'status',
+        type: FieldType.Text,
+        namespaceId,
+      });
+    }
+    assert.deepEqual(
+      (await upgraded.security.listAllFields(context, table.id)).map((field) => field.key).sort(),
+      ['acme.status', 'name', 'status'],
+    );
+    await upgraded.stop();
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

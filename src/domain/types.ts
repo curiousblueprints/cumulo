@@ -305,6 +305,29 @@ export interface SecurityRuleFieldGrant {
 }
 
 /**
+ * A field as the layers above see it: the stored definition plus how it is
+ * addressed.
+ *
+ * A record's values are keyed by API name, and two namespaces may each
+ * contribute a `status` to the same table -- that is what namespaces are for.
+ * So the key is qualified with the contributing namespace whenever it is not
+ * the table's own: `status` for the table's namespace, `acme.status` for a
+ * package's. Without that the two would collide and a write would land on
+ * whichever field happened to win.
+ */
+export interface FieldView extends FieldDef {
+  /** How this field is addressed in a record's values and in write input. */
+  key: string;
+  /** The namespace that contributed the field. */
+  namespaceName: string;
+}
+
+/** The key a field is addressed by on records of `tableNamespaceId`. */
+export function fieldKey(field: FieldDef, tableNamespaceId: Id, namespaceName: string): string {
+  return field.namespaceId === tableNamespaceId ? field.name : `${namespaceName}.${field.name}`;
+}
+
+/**
  * A tab in the user space, belonging to one security role.
  *
  * Tabs are discrete per role: they are NOT inherited up or down the hierarchy

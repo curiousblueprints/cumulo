@@ -419,19 +419,41 @@ Update checks required-ness only over the fields in the patch. A required field
 the caller is not touching keeps whatever it has, which is what lets records
 written before a field became required go on being edited.
 
-## API names
+## API names, namespaces and addressing
 
-A field's API name is unique on its table, expressed as a unique index rather
-than a table constraint: `applySchema` can add an index to a table that already
-exists, so the rule reaches databases created before it, which a changed
-`UNIQUE(...)` clause could not.
+Uniqueness is per namespace: `(tableId, namespaceId, name)`. Two packages may
+each contribute a `status` to one table, which is the whole point of having
+namespaces -- neither package knows the other exists. It is expressed as a
+unique index rather than a table constraint, because `applySchema` can add an
+index to a table that already exists and a changed `UNIQUE(...)` clause cannot.
+If existing rows already break it, index creation fails naming the table and
+columns rather than surfacing a raw SQLite error; that needs a human.
 
-Uniqueness deliberately ignores the namespace. Two packages contributing a
-`status` to one table would collide in every expression that names a field --
-clauses, record input, the API -- and nothing may claim the `name` the table
-was created with. If an existing database already breaks the rule, index
-creation fails with a message naming the table and columns rather than a raw
-SQLite error; it needs a human, not a guess.
+`name` is handled separately, in `MetadataService`, because it is not a
+uniqueness rule at all: no namespace may contribute one, including a package
+under its own. It belongs to the table's own Name field, which sits in the
+table's own namespace.
+
+### Why keys are qualified
+
+A record's `values` are keyed by API name, so allowing two namespaces to share
+one raises an immediate question: which `status` does `values.status` mean?
+Without an answer the two silently collide and a write lands on whichever field
+won a map.
+
+`FieldView` answers it. Every field handed above the security layer carries a
+`key`: the bare name when the field belongs to the table's own namespace, and
+`namespace.name` when a package contributed it. Projection writes that key,
+input is resolved by it, and search reports the field that actually matched.
+API names cannot contain a dot, so the qualified form is unambiguous.
+
+The API reports the key as a field's `name`, with the unqualified form beside
+it as `apiName`. A client therefore reads and writes records without knowing
+namespaces exist, which is what keeps `record.values[field.name]` correct in
+the browser whether or not a package is installed.
+
+Clauses are unaffected: `securityRuleClause` points at a field by id, so it
+never had this problem to begin with.
 
 ## Deleting a field
 
