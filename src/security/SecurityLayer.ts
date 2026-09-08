@@ -2,6 +2,7 @@ import {
   AccessType,
   FieldAccess,
   FieldType,
+  NAME_FIELD,
   type FieldDef,
   type Id,
   type Namespace,
@@ -22,11 +23,21 @@ import {
   rulesGrantingCreate,
   type PermissionSet,
 } from './PermissionResolver.js';
-import { fromStoredValue, isSystemAssigned, toStoredValue } from './values.js';
+import { fromStoredValue, isSystemAssigned, labelForValue, toStoredValue } from './values.js';
 
 export interface QueryOptions {
   limit?: number;
   offset?: number;
+}
+
+/** One global-search result: the record, and the field that matched. */
+export interface SearchHit {
+  record: RecordView;
+  table: TableDef;
+  /** How the record reads in a list -- its Name where the caller can see it. */
+  label: string;
+  field: FieldDef;
+  value: string;
 }
 
 /**
@@ -360,6 +371,86 @@ export class SecurityLayer {
     });
   }
 
+  // --- tabs ---------------------------------------------------------------
+
+  /**
+   * The tables this user's role puts on screen, in its configured order.
+   *
+   * Tabs are the role's own: unlike rules, they are neither inherited from a
+   * parent nor rolled up from children. A tab is still only shown if the role
+   * can actually reach the table, so a tab left behind by a revoked rule
+   * quietly stops appearing rather than leading somewhere forbidden.
+   */
+  async listTabs(context: SecurityContext): Promise<TableDef[]> {
+    const tabs = await this.store.listRoleTabs(context.role.id);
+    const reachable = new Map(
+      (await this.listTables(context)).map((table) => [table.id, table]),
+    );
+    return tabs.flatMap((tab) => {
+      const table = reachable.get(tab.tableId);
+      return table ? [table] : [];
+    });
+  }
+
+  // --- global search --------------------------------------------------------
+
+  /**
+   * Search every table the caller can reach.
+   *
+   * Storage narrows the candidates by matching searchable fields; the security
+   * layer then loads each candidate the ordinary way, so record-level clauses
+   * and field grants decide what actually comes back. A field the caller may
+   * not read cannot produce a hit for them, even when its value matches.
+   */
+  async search(context: SecurityContext, term: string, limit = 50): Promise<SearchHit[]> {
+    const query = term.trim();
+    if (query === '') return [];
+
+    const tables = await this.listTables(context);
+    const hits: SearchHit[] = [];
+
+    for (const table of tables) {
+      if (hits.length >= limit) break;
+      const readable = await this.listReadableFields(context, table.id);
+      const searchable = readable.filter((field) => field.isSearchable);
+      if (searchable.length === 0) continue;
+
+      const candidates = await this.store.findRecordIdsMatching(
+        searchable.map((field) => field.id),
+        query,
+        limit * 4,
+      );
+
+      for (const recordId of candidates) {
+        if (hits.length >= limit) break;
+        let record: RecordView;
+        try {
+          // The ordinary read path, so the clauses run.
+          record = await this.getRecord(context, recordId);
+        } catch {
+          continue;
+        }
+        const matched = searchable.find((field) => {
+          const value = record.values[field.name];
+          return (
+            value !== null &&
+            value !== undefined &&
+            String(value).toLowerCase().includes(query.toLowerCase())
+          );
+        });
+        if (!matched) continue;
+        hits.push({
+          record,
+          table,
+          label: recordLabel(record, readable),
+          field: matched,
+          value: String(record.values[matched.name] ?? ''),
+        });
+      }
+    }
+    return hits;
+  }
+
   // --- what the caller may do, for the UI to ask before offering it -------
 
   /** Whether the user may create records in this table at all. */
@@ -561,6 +652,24 @@ export class SecurityLayer {
       values: projected,
     };
   }
+}
+
+/**
+ * How a record reads in a list: its Name, or the first readable value that
+ * will do, or its id. Computed here rather than in the client because only
+ * this layer knows which fields the caller may actually read.
+ */
+function recordLabel(record: RecordView, fields: FieldDef[]): string {
+  const named = fields.find((field) => field.name === NAME_FIELD);
+  const ordered = named ? [named, ...fields.filter((field) => field !== named)] : fields;
+  for (const field of ordered) {
+    if (field.type === FieldType.Reference) continue;
+    const value = record.values[field.name];
+    if (value !== null && value !== undefined && String(value) !== '') {
+      return labelForValue(field, value);
+    }
+  }
+  return record.id.slice(0, 8);
 }
 
 function nameIndex(fields: ReadonlyMap<Id, FieldDef>): Map<string, FieldDef> {

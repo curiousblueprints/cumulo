@@ -13,6 +13,7 @@ import {
   type RecordRow,
   type SecurityRole,
   type SecurityRoleRule,
+  type SecurityRoleTab,
   type SecurityRule,
   type SecurityRuleClause,
   type SecurityRuleFieldGrant,
@@ -242,6 +243,10 @@ export class MetadataStore {
     ).map(toField);
   }
 
+  async updateField(id: Id, patch: Row): Promise<FieldDef | null> {
+    return map(await this.db.update(T.field, id, patch), toField);
+  }
+
   async deleteField(id: Id): Promise<boolean> {
     return this.db.delete(T.field, id);
   }
@@ -357,6 +362,35 @@ export class MetadataStore {
     return this.db.delete(T.securityRuleFieldGrant, id);
   }
 
+  // --- securityRoleTab ---------------------------------------------------
+
+  async insertRoleTab(tab: SecurityRoleTab): Promise<SecurityRoleTab> {
+    await this.db.insert(T.securityRoleTab, { ...tab });
+    return tab;
+  }
+
+  /** One role's tabs, in the order they should appear. */
+  async listRoleTabs(roleId: Id): Promise<SecurityRoleTab[]> {
+    return (
+      await this.db.find(T.securityRoleTab, {
+        where: [{ column: 'securityRoleId', operator: 'eq', value: roleId }],
+        orderBy: [{ column: 'position' }, { column: 'createdAt' }],
+      })
+    ).map(toRoleTab);
+  }
+
+  async getRoleTab(id: Id): Promise<SecurityRoleTab | null> {
+    return map(await this.db.findById(T.securityRoleTab, id), toRoleTab);
+  }
+
+  async updateRoleTabPosition(id: Id, position: number): Promise<void> {
+    await this.db.update(T.securityRoleTab, id, { position });
+  }
+
+  async deleteRoleTab(id: Id): Promise<boolean> {
+    return this.db.delete(T.securityRoleTab, id);
+  }
+
   // --- record and value --------------------------------------------------
 
   async insertRecord(record: RecordRow): Promise<RecordRow> {
@@ -409,6 +443,25 @@ export class MetadataStore {
     }
   }
 
+  /**
+   * Record ids whose value for one of `fieldIds` contains `term`.
+   *
+   * The match is done in storage because scanning every value in the
+   * application would not survive a real data set. Which records the caller
+   * may actually see is decided afterwards, by the security layer.
+   */
+  async findRecordIdsMatching(fieldIds: Id[], term: string, limit: number): Promise<Id[]> {
+    if (fieldIds.length === 0 || term === '') return [];
+    const rows = await this.db.find(T.value, {
+      where: [
+        { column: 'fieldId', operator: 'in', value: fieldIds },
+        { column: 'value', operator: 'like', value: `%${escapeLike(term)}%` },
+      ],
+      limit,
+    });
+    return [...new Set(rows.map((row) => String(row['recordId'])))];
+  }
+
   async countReferencesTo(fieldId: Id, recordId: Id): Promise<number> {
     return this.db.count(T.value, {
       where: [
@@ -417,6 +470,14 @@ export class MetadataStore {
       ],
     });
   }
+}
+
+/**
+ * SQLite's LIKE treats % and _ as wildcards. Neither is meaningful in a search
+ * box, so they are matched literally -- a search for "50%" means "50%".
+ */
+function escapeLike(term: string): string {
+  return term.replaceAll('%', '\\%').replaceAll('_', '\\_');
 }
 
 function map<T>(row: Row | null, fn: (row: Row) => T): T | null {
@@ -489,6 +550,7 @@ function toField(row: Row): FieldDef {
     type: str(row, 'type') as FieldType,
     isRequired: bool(row, 'isRequired'),
     referenceTableId: nullableStr(row, 'referenceTableId'),
+    isSearchable: bool(row, 'isSearchable'),
     isSystem: bool(row, 'isSystem'),
     autoNumberNext: Number(row['autoNumberNext'] ?? 1) || 1,
     createdAt: str(row, 'createdAt'),
@@ -541,6 +603,16 @@ function toFieldGrant(row: Row): SecurityRuleFieldGrant {
     fieldId: str(row, 'fieldId'),
     // A grant with no level recorded is read-only: the conservative reading.
     access: str(row, 'access') === FieldAccess.Edit ? FieldAccess.Edit : FieldAccess.Read,
+    createdAt: str(row, 'createdAt'),
+  };
+}
+
+function toRoleTab(row: Row): SecurityRoleTab {
+  return {
+    id: str(row, 'id'),
+    securityRoleId: str(row, 'securityRoleId'),
+    tableId: str(row, 'tableId'),
+    position: Number(row['position'] ?? 0),
     createdAt: str(row, 'createdAt'),
   };
 }

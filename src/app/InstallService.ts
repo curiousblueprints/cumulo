@@ -127,6 +127,7 @@ export class InstallService {
           type: FieldType.Text,
           isRequired: true,
           referenceTableId: null,
+          isSearchable: true,
           isSystem: true,
           autoNumberNext: 1,
           createdAt: nowIso(),

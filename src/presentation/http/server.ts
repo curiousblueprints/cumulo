@@ -1,10 +1,13 @@
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { fileURLToPath } from 'node:url';
 import type { Application } from '../../app/Application.js';
 import type { FeatureFlags } from '../../config.js';
 import { UniqueConstraintError } from '../../db/types.js';
 import { SecurityError, AccessDeniedError, NotFoundError, ValidationError } from '../../security/errors.js';
+import { registerApiRoutes } from '../api/routes.js';
 import { registerWebRoutes } from '../web/routes.js';
 import { RedirectSignal } from './signals.js';
+import { serveStaticFile } from './static.js';
 import { Router } from './router.js';
 import { parseCookies, SESSION_COOKIE, SessionStore } from './sessions.js';
 import type { HttpMethod, HttpRequest, HttpResponse } from './types.js';
@@ -14,6 +17,8 @@ export interface ServerOptions {
   maxBodyBytes?: number;
   /** Defaults to everything off. */
   features?: Partial<FeatureFlags>;
+  /** Where the built client bundle lives. Defaults to ./public. */
+  clientRoot?: string;
 }
 
 const DEFAULT_FEATURES: FeatureFlags = {
@@ -43,6 +48,7 @@ export function buildRouter(
     headers: { 'content-type': 'application/json; charset=utf-8' },
     body: JSON.stringify({ status: 'ok' }),
   }));
+  registerApiRoutes(router, app);
   registerWebRoutes(router, app, sessions, features);
   return router;
 }
@@ -51,9 +57,10 @@ export function createServer(app: Application, options: ServerOptions = {}): Ser
   const sessions = new SessionStore();
   const router = buildRouter(app, sessions, { ...DEFAULT_FEATURES, ...options.features });
   const maxBody = options.maxBodyBytes ?? DEFAULT_MAX_BODY;
+  const clientRoot = options.clientRoot ?? defaultClientRoot();
 
   return createHttpServer((incoming, outgoing) => {
-    void handle(app, router, sessions, maxBody, incoming, outgoing).catch((error) => {
+    void handle(app, router, sessions, maxBody, clientRoot, incoming, outgoing).catch((error) => {
       writeResponse(outgoing, {
         status: 500,
         headers: { 'content-type': 'text/plain; charset=utf-8' },
@@ -63,11 +70,17 @@ export function createServer(app: Application, options: ServerOptions = {}): Ser
   });
 }
 
+/** The bundle sits next to the compiled server, at dist/public. */
+function defaultClientRoot(): string {
+  return fileURLToPath(new URL('../../../public/', import.meta.url));
+}
+
 async function handle(
   app: Application,
   router: Router,
   sessions: SessionStore,
   maxBody: number,
+  clientRoot: string,
   incoming: IncomingMessage,
   outgoing: ServerResponse,
 ): Promise<void> {
@@ -109,10 +122,13 @@ async function handle(
   let response: HttpResponse | null;
   try {
     response = await router.dispatch(request);
+    if (!response && method === 'GET' && url.pathname.startsWith('/assets/')) {
+      response = await serveStaticFile(clientRoot, url.pathname.slice('/assets/'.length));
+    }
   } catch (error) {
     response = error instanceof RedirectSignal
       ? { status: 303, headers: { location: error.location }, body: '' }
-      : errorResponse(error);
+      : errorResponse(error, url.pathname);
   }
   writeResponse(
     outgoing,
@@ -135,7 +151,7 @@ export function statusFor(error: unknown): number {
   return 500;
 }
 
-function errorResponse(error: unknown): HttpResponse {
+function errorResponse(error: unknown, path = ''): HttpResponse {
   const status = statusFor(error);
   const message =
     error instanceof UniqueConstraintError
@@ -143,11 +159,16 @@ function errorResponse(error: unknown): HttpResponse {
       : error instanceof Error
         ? error.message
         : 'Unexpected error';
-  return {
-    status,
-    headers: { 'content-type': 'text/plain; charset=utf-8' },
-    body: status === 500 ? 'Internal error' : message,
-  };
+  const text = status === 500 ? 'Internal error' : message;
+  // The client reads errors as JSON, so the API answers in its own language.
+  if (path.startsWith('/api/')) {
+    return {
+      status,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+      body: JSON.stringify({ error: text }),
+    };
+  }
+  return { status, headers: { 'content-type': 'text/plain; charset=utf-8' }, body: text };
 }
 
 async function readBody(incoming: IncomingMessage, maxBytes: number): Promise<string | null> {

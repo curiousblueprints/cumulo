@@ -136,3 +136,23 @@ test('update returns the stored row and delete reports whether it hit', async ()
   assert.equal(await db.delete('widget', 'a'), false);
   await db.close();
 });
+
+test('LIKE matches % and _ literally when they are escaped', async () => {
+  const db = await open();
+  await db.insert('widget', { id: 'a', name: '50% off', size: 0, active: false });
+  await db.insert('widget', { id: 'b', name: '50 percent off', size: 0, active: false });
+  await db.insert('widget', { id: 'c', name: 'a_b', size: 0, active: false });
+  await db.insert('widget', { id: 'd', name: 'axb', size: 0, active: false });
+
+  const like = async (pattern: string): Promise<string[]> =>
+    (await db.find('widget', { where: [{ column: 'name', operator: 'like', value: pattern }] }))
+      .map((row) => String(row['id']))
+      .sort();
+
+  // Escaped, they are ordinary characters rather than wildcards.
+  assert.deepEqual(await like('%50\\%%'), ['a']);
+  assert.deepEqual(await like('%a\\_b%'), ['c']);
+  // Unescaped, they still behave as wildcards.
+  assert.deepEqual(await like('%a_b%'), ['c', 'd']);
+  await db.close();
+});

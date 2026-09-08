@@ -17,9 +17,11 @@ docker compose up --build
 ```
 
 The image needs no native build tooling and installs **zero runtime
-dependencies**: SQLite comes from Node's built-in `node:sqlite` module. The
-database lives on the `cumulo-data` volume at `/data/cumulo.db`, so an
-installation survives a rebuild.
+dependencies**: SQLite comes from Node's built-in `node:sqlite` module, and the
+front end -- React, Mantine, esbuild -- is compiled to two files during the
+build and never installed into the runtime image. The database lives on the
+`cumulo-data` volume at `/data/cumulo.db`, so an installation survives a
+rebuild.
 
 ```bash
 docker build -t cumulo .
@@ -39,11 +41,14 @@ docker run -p 3000:3000 -v cumulo-data:/data cumulo
 ### Locally
 
 ```bash
-npm install     # TypeScript only; there are no runtime dependencies
-npm run build
+npm install     # build-time only; there are no runtime dependencies
+npm run build   # compiles the server, then bundles the client
 npm start       # http://localhost:3000
 npm test
 ```
+
+`npm run build:client` rebuilds just the front end, which is the loop you want
+while working on it.
 
 Node 22.13 or newer is required, for `node:sqlite`.
 
@@ -63,10 +68,23 @@ Namespaces are not created here. They are meant to arrive with a package, so
 the console only lists them; set `CUMULO_ENABLE_NAMESPACE_CREATION=true` to add
 one by hand while testing.
 
+## The two faces
+
+The **user space** at `/app` is a React and [Mantine](https://mantine.dev)
+client: a centred global search, sign-out and setup at the far right, and the
+role's tabs beneath. It talks to a JSON API under `/api/v1`.
+
+The **setup console** at `/admin` is server-rendered HTML. It has its own
+frame on purpose -- nothing is shared between the two, so it is obvious at a
+glance which one you are looking at.
+
 ## The layers
 
 ```
-presentation  src/presentation   HTTP transport, router, sessions, HTML pages
+presentation  src/presentation   HTTP transport, router, sessions
+              src/presentation/api    JSON API for the client
+              src/presentation/web    server-rendered setup console
+              src/client              React + Mantine user space
 application   src/app            install, auth, metadata and record services
 security      src/security       the arbiter: roles, rules, clauses, projection
 database      src/db             DatabaseAdapter contract + the SQLite driver
@@ -219,6 +237,26 @@ their values and their field grants. Two are refused:
   rule would silently widen what that rule matches, so the rule has to be dealt
   with first. The error names the rule.
 
+## Tabs and global search
+
+**Tabs** decide which tables a user sees along the top, and in what order. They
+are configured per security role, on the role's page in setup.
+
+Tabs are the one thing in the model that is **not** inherited: unlike rules,
+they neither roll up from child roles nor come down from a parent. What a role
+puts on screen is its own decision. A tab whose table the role cannot actually
+reach is simply not shown, so a tab left behind by a revoked rule stops
+appearing rather than leading somewhere forbidden.
+
+**Global search** looks at every table the user can reach. It always searches
+Name fields; any other field can be marked **searchable** on its table's page
+in setup, and matches on it will return the record too.
+
+Results respect everything else: candidates are narrowed in storage, then each
+one is loaded through the ordinary read path, so record-level clauses and field
+grants decide what comes back. A field the user may not read cannot produce a
+hit for them even when its value matches.
+
 ## Lookups
 
 A field of type `reference` is a **lookup**: it points at a record in the table
@@ -245,10 +283,11 @@ and none of them owns anything.
 npm test
 ```
 
-78 tests over the adapter, the clause-logic parser, the security layer
+88 tests over the adapter, the clause-logic parser, the security layer
 (hierarchy inheritance, record filtering, per-field grants and the ceiling over
-them, namespace gating, metadata protection), lookups, the rename migration,
-and the HTTP surface end to end.
+them, namespace gating, metadata protection), lookups, tabs and global search,
+the rename migration, and the HTTP surface end to end -- the setup console as
+HTML, the user space through its JSON API.
 
 ## Assumptions and decisions
 

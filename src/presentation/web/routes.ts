@@ -5,13 +5,9 @@ import {
   AccessType,
   ClauseMatch,
   ClauseOperator,
-  DAYS_OF_WEEK,
   FieldAccess,
   FieldType,
-  MONTHS,
-  NAME_FIELD,
   type FieldDef,
-  type RecordView,
   type SecurityRole,
 } from '../../domain/types.js';
 import type { SecurityContext } from '../../security/context.js';
@@ -21,6 +17,7 @@ import { clearedCookie, sessionCookie, type SessionStore } from '../http/session
 import { RedirectSignal } from '../http/signals.js';
 import { html, redirect, type HttpRequest, type HttpResponse } from '../http/types.js';
 import { labelForValue } from '../../security/values.js';
+import { appShellHtml } from './appShell.js';
 import { csrfInput, escapeHtml, optionList, page } from './layout.js';
 
 /**
@@ -66,8 +63,29 @@ export function registerWebRoutes(
 
   router.get('/', async (request) => {
     if (!(await app.install.isSetupComplete())) return redirect('/setup');
-    return redirect(request.context ? '/tables' : '/login');
+    return redirect(request.context ? '/app' : '/login');
   });
+
+  // --- user space ---------------------------------------------------------
+  // Everything under /app is the Mantine client, which does its own routing.
+  // The shell is static, so an unauthenticated visitor gets a page that then
+  // sends them to /login rather than a redirect that leaks nothing useful.
+  const shell = async (): Promise<HttpResponse> => html(appShellHtml());
+  router.get('/app', shell);
+  router.get('/app/search', shell);
+  router.get('/app/tables/:tableId', shell);
+  router.get('/app/tables/:tableId/new', shell);
+  router.get('/app/records/:recordId', shell);
+
+  // The old server-rendered data pages now live in the client. Keeping the
+  // paths pointed at it means existing links and bookmarks still work.
+  router.get('/tables', async () => redirect('/app'));
+  router.get('/tables/:tableId', async (request) =>
+    redirect(`/app/tables/${encodeURIComponent(request.params['tableId'] ?? '')}`),
+  );
+  router.get('/records/:recordId', async (request) =>
+    redirect(`/app/records/${encodeURIComponent(request.params['recordId'] ?? '')}`),
+  );
 
   // --- initial setup -----------------------------------------------------
 
@@ -106,7 +124,7 @@ export function registerWebRoutes(
         password: request.body['password'] ?? '',
       });
       const session = sessions.create(context.user.id);
-      return redirect('/tables', { 'set-cookie': sessionCookie(session.id) });
+      return redirect('/app', { 'set-cookie': sessionCookie(session.id) });
     } catch (error) {
       return redirect(withMessage('/setup', 'error', messageOf(error)));
     }
@@ -116,7 +134,7 @@ export function registerWebRoutes(
 
   router.get('/login', async (request) => {
     if (!(await app.install.isSetupComplete())) return redirect('/setup');
-    if (request.context) return redirect('/tables');
+    if (request.context) return redirect('/app');
     return html(
       page(
         { title: 'Sign in', ...messages(request) },
@@ -139,7 +157,7 @@ export function registerWebRoutes(
         request.body['password'] ?? '',
       );
       const session = sessions.create(context.user.id);
-      return redirect('/tables', { 'set-cookie': sessionCookie(session.id) });
+      return redirect('/app', { 'set-cookie': sessionCookie(session.id) });
     } catch (error) {
       return redirect(withMessage('/login', 'error', messageOf(error)));
     }
@@ -151,195 +169,6 @@ export function registerWebRoutes(
   });
 
   // --- data --------------------------------------------------------------
-
-  router.get('/tables', async (request) => {
-    const context = requireUser(request);
-    const tables = await app.metadata.listTables(context);
-    const namespaces = await app.metadata.listNamespaces(context);
-    const namespaceName = (id: string): string =>
-      namespaces.find((namespace) => namespace.id === id)?.name ?? '';
-
-    const rows = tables
-      .map(
-        (table) =>
-          `<tr><td><a href="/tables/${escapeHtml(table.id)}">${escapeHtml(table.label)}</a></td>
-             <td><code>${escapeHtml(namespaceName(table.namespaceId))}.${escapeHtml(table.name)}</code></td></tr>`,
-      )
-      .join('');
-
-    return html(
-      page(
-        { title: 'Data', context, ...messages(request) },
-        `<h1>Data</h1>
-         <p class="lede">Tables your security role can reach.</p>
-         ${
-           tables.length === 0
-             ? `<section class="card"><p class="muted">No tables are visible to the
-                 <strong>${escapeHtml(context.role.name)}</strong> role.${
-                   context.role.isSystem
-                     ? ' <a href="/admin">Create one in Setup</a>.'
-                     : ' A rule granting access has to be assigned to your role first.'
-                 }</p></section>`
-             : `<section class="card"><table><thead><tr><th>Table</th><th>API name</th></tr></thead>
-                 <tbody>${rows}</tbody></table></section>`
-         }`,
-      ),
-    );
-  });
-
-  router.get('/tables/:tableId', async (request) => {
-    const context = requireUser(request);
-    const tableId = request.params['tableId'] as string;
-    const table = await app.security.getTable(context, tableId);
-    const fields = await app.metadata.listReadableFields(context, table.id);
-    const records = await app.records.list(context, table.id, { limit: 200 });
-    const mayCreate = await app.security.canCreate(context, table.id);
-
-    const header = fields.map((field) => `<th>${escapeHtml(field.label)}</th>`).join('');
-    const rows = records
-      .map(
-        (record) =>
-          `<tr><td><a href="/records/${escapeHtml(record.id)}">Open</a></td>${fields
-            .map((field) => `<td>${cell(field, record.values[field.name])}</td>`)
-            .join('')}</tr>`,
-      )
-      .join('');
-
-    return html(
-      page(
-        { title: table.label, context, ...messages(request) },
-        `<h1>${escapeHtml(table.label)}</h1>
-         <p class="lede">${records.length} record${records.length === 1 ? '' : 's'} visible to you.
-           ${
-             mayCreate
-               ? `<a href="/tables/${escapeHtml(table.id)}/new">New record</a>`
-               : ''
-           }</p>
-         <section class="card"><table><thead><tr><th></th>${header}</tr></thead>
-           <tbody>${rows || `<tr><td colspan="${fields.length + 1}" class="muted">Nothing to show.</td></tr>`}</tbody>
-         </table></section>`,
-      ),
-    );
-  });
-
-  router.get('/tables/:tableId/new', async (request) => {
-    const context = requireUser(request);
-    const tableId = request.params['tableId'] as string;
-    const table = await app.security.getTable(context, tableId);
-    if (!(await app.security.canCreate(context, table.id))) {
-      throw new AccessDeniedError(`No permission to create records in "${table.label}"`);
-    }
-    const fields = await app.security.listCreatableFields(context, table.id);
-    const lookups = await lookupOptions(app, context, fields);
-
-    return html(
-      page(
-        { title: `New ${table.label}`, context, ...messages(request) },
-        `<h1>New ${escapeHtml(table.label)}</h1>
-         <section class="card"><form method="post" action="/tables/${escapeHtml(table.id)}/records">
-           ${csrfInput(request.session?.csrfToken)}
-           ${fields.map((field) => fieldInput(field, null, lookups)).join('')}
-           <button>Create</button>
-           <a class="button secondary" href="/tables/${escapeHtml(table.id)}">Cancel</a>
-         </form></section>`,
-      ),
-    );
-  });
-
-  router.post(
-    '/tables/:tableId/records',
-    action(
-      async (request) => {
-        const context = requireUser(request);
-        const tableId = request.params['tableId'] as string;
-        const table = await app.security.getTable(context, tableId);
-        const fields = await app.security.listCreatableFields(context, table.id);
-        const record = await app.records.create(context, table.id, valuesFrom(request, fields));
-        throw new RedirectSignal(withMessage(`/records/${record.id}`, 'notice', 'Record created'));
-      },
-      (request) => `/tables/${request.params['tableId'] ?? ''}/new`,
-    ),
-  );
-
-  router.get('/records/:recordId', async (request) => {
-    const context = requireUser(request);
-    const recordId = request.params['recordId'] as string;
-    const record = await app.records.get(context, recordId);
-    const table = await app.security.getTable(context, record.tableId);
-    const fields = await app.security.listEditableFields(context, table.id);
-    const readable = await app.metadata.listReadableFields(context, table.id);
-    const lookups = await lookupOptions(app, context, fields);
-
-    const details = readable
-      .map(
-        (field) =>
-          `<tr><th>${escapeHtml(field.label)}</th><td>${cell(
-            field,
-            record.values[field.name],
-          )}</td></tr>`,
-      )
-      .join('');
-
-    return html(
-      page(
-        { title: table.label, context, ...messages(request) },
-        `<h1>${escapeHtml(table.label)}</h1>
-         <p class="lede"><a href="/tables/${escapeHtml(table.id)}">Back to ${escapeHtml(
-           table.label,
-         )}</a> &middot; <code>${escapeHtml(record.id)}</code></p>
-         <section class="card"><table><tbody>${details}
-           <tr><th>Created</th><td>${escapeHtml(record.createdAt)}</td></tr>
-           <tr><th>Updated</th><td>${escapeHtml(record.updatedAt)}</td></tr></tbody></table></section>
-         ${
-           fields.length > 0
-             ? `<h2>Edit</h2><section class="card">
-                <form method="post" action="/records/${escapeHtml(record.id)}">
-                  ${csrfInput(request.session?.csrfToken)}
-                  ${fields
-                    .map((field) => fieldInput(field, record.values[field.name], lookups))
-                    .join('')}
-                  <button>Save</button>
-                </form>
-                <form method="post" action="/records/${escapeHtml(record.id)}/delete">
-                  ${csrfInput(request.session?.csrfToken)}
-                  <button class="danger">Delete record</button>
-                </form></section>`
-             : '<p class="muted">You have read-only access to this record.</p>'
-         }`,
-      ),
-    );
-  });
-
-  router.post(
-    '/records/:recordId',
-    action(
-      async (request) => {
-        const context = requireUser(request);
-        const recordId = request.params['recordId'] as string;
-        const record = await app.records.get(context, recordId);
-        const fields = await app.security.listEditableFields(context, record.tableId);
-        await app.records.update(context, record.id, valuesFrom(request, fields));
-        return 'Record saved';
-      },
-      (request) => `/records/${request.params['recordId'] ?? ''}`,
-    ),
-  );
-
-  router.post(
-    '/records/:recordId/delete',
-    action(
-      async (request) => {
-        const context = requireUser(request);
-        const recordId = request.params['recordId'] as string;
-        const record = await app.records.get(context, recordId);
-        await app.records.delete(context, record.id);
-        throw new RedirectSignal(
-          withMessage(`/tables/${record.tableId}`, 'notice', 'Record deleted'),
-        );
-      },
-      (request) => `/records/${request.params['recordId'] ?? ''}`,
-    ),
-  );
 
   registerAdminRoutes(router, app, { requireUser, action, features });
 }
@@ -415,9 +244,10 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
              ${roles
                .map(
                  (role) =>
-                   `<tr><td>${escapeHtml(role.name)}${
-                     role.isSystem ? ' <span class="muted">(system)</span>' : ''
-                   }</td><td class="muted">${
+                   `<tr><td><a href="/admin/roles/${escapeHtml(role.id)}">${escapeHtml(
+                     role.name,
+                   )}</a>${role.isSystem ? ' <span class="muted">(system)</span>' : ''}</td>
+                     <td class="muted">${
                      role.parentId ? escapeHtml(roleName(role.parentId)) : '&mdash;'
                    }</td></tr>`,
                )
@@ -589,6 +419,11 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
     const countBy = <T,>(items: T[], roleId: string, of: (item: T) => string): number =>
       items.filter((item) => of(item) === roleId).length;
 
+    const tabsByRole = new Map<string, number>();
+    for (const role of roles) {
+      tabsByRole.set(role.id, (await app.metadata.listRoleTabs(context, role.id)).length);
+    }
+
     const renderRole = (role: SecurityRole): string => {
       const children = roles.filter((other) => other.parentId === role.id);
       const grants = namespaceAccess
@@ -602,18 +437,20 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
 
       // Escaped one fact at a time, so the separator stays an entity rather
       // than being escaped into visible text.
+      const tabCount = tabsByRole.get(role.id) ?? 0;
       const facts = [
         `${userCount} user${userCount === 1 ? '' : 's'}`,
         role.isSystem ? 'all access' : `${ruleCount} rule${ruleCount === 1 ? '' : 's'}`,
+        `${tabCount} tab${tabCount === 1 ? '' : 's'}`,
         ...(grants.length > 0 ? [`namespaces: ${grants.join(', ')}`] : []),
       ]
         .map(escapeHtml)
         .join(' &middot; ');
 
       return `<li>
-        <strong>${escapeHtml(role.name)}</strong>${
-          role.isSystem ? ' <span class="muted">(system)</span>' : ''
-        }
+        <a href="/admin/roles/${escapeHtml(role.id)}"><strong>${escapeHtml(
+          role.name,
+        )}</strong></a>${role.isSystem ? ' <span class="muted">(system)</span>' : ''}
         <span class="muted">&mdash; ${facts}</span>
         ${children.length > 0 ? `<ul>${children.map((child) => renderRole(child)).join('')}</ul>` : ''}
       </li>`;
@@ -634,8 +471,90 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
          <section class="card">
            <p class="muted">Access flows <strong>up</strong> this tree: a role holds its own
              rules plus every rule of every role beneath it. That is why Administrator, at the
-             root with no rules of its own, holds everything.</p>
+             root with no rules of its own, holds everything. Tabs are the exception &mdash; they
+             are configured per role and inherited in neither direction. Open a role to set them.</p>
            <ul class="tree">${roots.map((role) => renderRole(role)).join('')}</ul>
+         </section>`,
+      ),
+    );
+  });
+
+  router.get('/admin/roles/:roleId', async (request) => {
+    const context = requireUser(request);
+    app.security.assertAdministrator(context);
+    const roleId = request.params['roleId'] as string;
+    const roles = await app.metadata.listSecurityRoles(context);
+    const role = roles.find((candidate) => candidate.id === roleId);
+    if (!role) throw new AccessDeniedError('No such role');
+
+    const [tabs, tables] = await Promise.all([
+      app.metadata.listRoleTabs(context, role.id),
+      app.metadata.listTables(context),
+    ]);
+    const token = request.session?.csrfToken;
+    const onTabs = new Set(tabs.map((entry) => entry.table.id));
+
+    return html(
+      page(
+        { title: role.name, context, ...messages(request) },
+        `<h1>${escapeHtml(role.name)}</h1>
+         <p class="lede"><a href="/admin/roles">Back to the hierarchy</a> &middot;
+           <a href="/admin">Setup</a></p>
+
+         <h2>Tabs</h2>
+         <section class="card">
+           <p class="muted">The tables this role sees along the top of the app, in this order.
+             Tabs belong to this role alone &mdash; unlike rules, they are not inherited from a
+             parent or rolled up from children.</p>
+           <table><thead><tr><th>#</th><th>Table</th><th>Order</th><th></th></tr></thead><tbody>
+             ${
+               tabs
+                 .map(
+                   (entry, index) =>
+                     `<tr><td class="muted">${index + 1}</td>
+                        <td>${escapeHtml(entry.table.label)}
+                          <code class="muted">${escapeHtml(entry.table.name)}</code></td>
+                        <td><form method="post" action="/admin/tabs/${escapeHtml(
+                          entry.tab.id,
+                        )}/move" class="inline">${csrfInput(token)}
+                            <button name="direction" value="left" class="secondary"
+                              style="margin:0"${index === 0 ? ' disabled' : ''}>&larr;</button>
+                          </form>
+                          <form method="post" action="/admin/tabs/${escapeHtml(
+                            entry.tab.id,
+                          )}/move" class="inline">${csrfInput(token)}
+                            <button name="direction" value="right" class="secondary"
+                              style="margin:0"${
+                                index === tabs.length - 1 ? ' disabled' : ''
+                              }>&rarr;</button>
+                          </form></td>
+                        <td><form method="post" action="/admin/tabs/${escapeHtml(
+                          entry.tab.id,
+                        )}/delete" class="inline">${csrfInput(token)}
+                            <button class="danger" style="margin:0">Remove</button></form></td>
+                      </tr>`,
+                 )
+                 .join('') ||
+               '<tr><td colspan="4" class="muted">No tabs. This role sees an empty app.</td></tr>'
+             }
+           </tbody></table>
+           <form method="post" action="/admin/roles/${escapeHtml(role.id)}/tabs">${csrfInput(
+             token,
+           )}
+             <label>Add a tab</label>
+             <select name="tableId" required>
+               ${optionList(
+                 tables
+                   .filter((table) => !onTabs.has(table.id))
+                   .map((table) => ({ id: table.id, label: table.label })),
+               )}
+             </select>
+             <button>Add tab</button></form>
+           ${
+             role.isSystem
+               ? '<p class="muted">Administrator reaches every table, so any of them can be a tab.</p>'
+               : '<p class="muted">A tab whose table this role cannot reach is simply not shown.</p>'
+           }
          </section>`,
       ),
     );
@@ -661,8 +580,10 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
 
          <h2>Fields</h2>
          <section class="card">
+           <p class="muted">A global search always looks at Name. Mark any other field
+             searchable to have matches on it return the record too.</p>
            <table><thead><tr><th>Name</th><th>Label</th><th>Type</th><th>Required</th>
-             <th></th></tr></thead><tbody>
+             <th>Searchable</th><th></th></tr></thead><tbody>
              ${
                fields
                  .map(
@@ -677,6 +598,13 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
                            )}`
                          : ''
                      }</td><td class="muted">${field.isRequired ? 'yes' : 'no'}</td>
+                     <td><form method="post" action="/admin/fields/${escapeHtml(
+                       field.id,
+                     )}/searchable" class="inline">${csrfInput(token)}
+                       ${field.isSearchable ? '' : '<input type="hidden" name="isSearchable" value="on">'}
+                       <button class="secondary" style="margin:0">${
+                         field.isSearchable ? 'Yes' : 'No'
+                       }</button></form></td>
                      <td>${
                        field.isSystem
                          ? '<span class="muted">system</span>'
@@ -686,7 +614,7 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
                               <button class="danger" style="margin:0">Delete</button></form>`
                      }</td></tr>`,
                  )
-                 .join('') || '<tr><td colspan="5" class="muted">No fields yet.</td></tr>'
+                 .join('') || '<tr><td colspan="6" class="muted">No fields yet.</td></tr>'
              }
            </tbody></table>
            <form method="post" action="/admin/fields">${csrfInput(token)}
@@ -709,6 +637,8 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
                    ${optionList(tables.map((other) => ({ id: other.id, label: other.label })))}
                  </select></div>
                <div><label>Required</label><select name="isRequired">
+                 <option value="">No</option><option value="on">Yes</option></select></div>
+               <div><label>Searchable</label><select name="isSearchable">
                  <option value="">No</option><option value="on">Yes</option></select></div>
              </div>
              <button>Add field</button></form>
@@ -826,6 +756,52 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
     }, backTo);
 
   router.post(
+    '/admin/roles/:roleId/tabs',
+    adminAction(async (request, context) => {
+      const result = await app.metadata.addRoleTab(
+        context,
+        request.params['roleId'] ?? '',
+        request.body['tableId'] ?? '',
+      );
+      return result.created ? 'Tab added' : 'That table is already a tab for this role';
+    }),
+  );
+
+  router.post(
+    '/admin/tabs/:tabId/move',
+    adminAction(async (request, context) => {
+      await app.metadata.moveRoleTab(
+        context,
+        request.params['tabId'] ?? '',
+        request.body['direction'] === 'left' ? 'left' : 'right',
+      );
+      return 'Tab moved';
+    }),
+  );
+
+  router.post(
+    '/admin/tabs/:tabId/delete',
+    adminAction(async (request, context) => {
+      await app.metadata.removeRoleTab(context, request.params['tabId'] ?? '');
+      return 'Tab removed';
+    }),
+  );
+
+  router.post(
+    '/admin/fields/:fieldId/searchable',
+    adminAction(async (request, context) => {
+      const field = await app.metadata.setFieldSearchable(
+        context,
+        request.params['fieldId'] ?? '',
+        request.body['isSearchable'] === 'on',
+      );
+      return field.isSearchable
+        ? `"${field.label}" is now searchable`
+        : `"${field.label}" is no longer searchable`;
+    }),
+  );
+
+  router.post(
     '/admin/namespaces',
     adminAction(async (request, context) => {
       // The form is hidden without the flag; refuse the bare POST as well.
@@ -908,6 +884,7 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
         label: request.body['label'] ?? '',
         type: (request.body['type'] ?? FieldType.Text) as FieldType,
         isRequired: request.body['isRequired'] === 'on',
+        isSearchable: request.body['isSearchable'] === 'on',
         referenceTableId: request.body['referenceTableId'] || null,
       });
       return 'Field created';
@@ -975,62 +952,6 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
 /** Form-field prefix carrying one field's grant on the rule form. */
 const GRANT_PREFIX = 'grant_';
 
-/** One selectable target per lookup field, keyed by field id. */
-type LookupOptions = Map<string, { id: string; label: string }[]>;
-
-/**
- * Load the records a lookup field can point at, through the security layer, so
- * the picker only ever offers records the user can actually see.
- */
-async function lookupOptions(
-  app: Application,
-  context: SecurityContext,
-  fields: FieldDef[],
-): Promise<LookupOptions> {
-  const options: LookupOptions = new Map();
-  for (const field of fields) {
-    if (field.type !== FieldType.Reference || !field.referenceTableId) continue;
-    try {
-      const targets = await app.records.list(context, field.referenceTableId, { limit: 200 });
-      const labelFields = await app.metadata.listReadableFields(context, field.referenceTableId);
-      options.set(
-        field.id,
-        targets.map((target) => ({ id: target.id, label: recordLabel(target, labelFields) })),
-      );
-    } catch {
-      // No access to the looked-up table: offer nothing rather than failing
-      // the whole page. Typing an id is still refused by the security layer.
-      options.set(field.id, []);
-    }
-  }
-  return options;
-}
-
-/** How a record reads in a picker: its Name, or the first thing that will do. */
-function recordLabel(record: RecordView, fields: FieldDef[]): string {
-  const named = fields.find((field) => field.name === NAME_FIELD);
-  const ordered = named ? [named, ...fields.filter((field) => field !== named)] : fields;
-  for (const field of ordered) {
-    if (field.type === FieldType.Reference) continue;
-    const value = record.values[field.name];
-    if (value !== null && value !== undefined && String(value).length > 0) {
-      return `${labelForValue(field, value)} (${record.id.slice(0, 8)})`;
-    }
-  }
-  return record.id;
-}
-
-function valuesFrom(request: HttpRequest, fields: FieldDef[]): Record<string, unknown> {
-  const values: Record<string, unknown> = {};
-  for (const field of fields) {
-    const raw = request.body[`field_${field.name}`];
-    if (raw === undefined) continue;
-    if (field.type === FieldType.Boolean) values[field.name] = raw === 'on' ? 'true' : 'false';
-    else values[field.name] = raw;
-  }
-  return values;
-}
-
 /** Human wording for a field type, since the API names are terse. */
 function fieldTypeLabel(type: FieldType): string {
   switch (type) {
@@ -1045,95 +966,6 @@ function fieldTypeLabel(type: FieldType): string {
     default:
       return type;
   }
-}
-
-function fieldInput(field: FieldDef, current: unknown, lookups: LookupOptions): string {
-  const name = `field_${field.name}`;
-  const label = `<label for="${escapeHtml(name)}">${escapeHtml(field.label)}${
-    field.isRequired ? ' *' : ''
-  }</label>`;
-  const value = escapeHtml(display(current));
-  const currentNumber = current === null || current === undefined ? '' : String(current);
-
-  /** A picker over a fixed list, which is what months and weekdays are. */
-  const choose = (choices: readonly { value: number; label: string }[]): string =>
-    `${label}<select id="${escapeHtml(name)}" name="${escapeHtml(name)}"${
-      field.isRequired ? ' required' : ''
-    }>
-      <option value=""${currentNumber ? '' : ' selected'}>&mdash; none &mdash;</option>
-      ${optionList(
-        choices.map((choice) => ({ id: String(choice.value), label: choice.label })),
-        currentNumber,
-      )}</select>`;
-
-  switch (field.type) {
-    case FieldType.Month:
-      return choose(MONTHS);
-    case FieldType.DayOfWeek:
-      return choose(DAYS_OF_WEEK);
-    case FieldType.Year:
-      return `${label}<input id="${escapeHtml(name)}" name="${escapeHtml(
-        name,
-      )}" type="number" min="1000" max="9999" step="1" inputmode="numeric" value="${value}"${
-        field.isRequired ? ' required' : ''
-      }>`;
-    case FieldType.Day:
-      return `${label}<input id="${escapeHtml(name)}" name="${escapeHtml(
-        name,
-      )}" type="number" min="1" max="31" step="1" value="${value}"${
-        field.isRequired ? ' required' : ''
-      }>`;
-    case FieldType.Reference: {
-      const targets = lookups.get(field.id) ?? [];
-      const currentId = current === null || current === undefined ? '' : String(current);
-      // A value the picker cannot show (no read access to that record) is kept
-      // as an option so saving the form does not silently clear the lookup.
-      const missing =
-        currentId && !targets.some((target) => target.id === currentId)
-          ? `<option value="${escapeHtml(currentId)}" selected>${escapeHtml(currentId)}</option>`
-          : '';
-      return `${label}<select id="${escapeHtml(name)}" name="${escapeHtml(name)}"${
-        field.isRequired ? ' required' : ''
-      }>
-        <option value=""${currentId ? '' : ' selected'}>&mdash; none &mdash;</option>
-        ${missing}${optionList(targets, currentId)}</select>`;
-    }
-    case FieldType.Boolean:
-      return `${label}<select id="${escapeHtml(name)}" name="${escapeHtml(name)}">
-        <option value="off"${current === true ? '' : ' selected'}>No</option>
-        <option value="on"${current === true ? ' selected' : ''}>Yes</option></select>`;
-    case FieldType.Number:
-      return `${label}<input id="${escapeHtml(name)}" name="${escapeHtml(
-        name,
-      )}" type="number" step="any" value="${value}"${field.isRequired ? ' required' : ''}>`;
-    case FieldType.Date:
-      return `${label}<input id="${escapeHtml(name)}" name="${escapeHtml(
-        name,
-      )}" type="date" value="${value}"${field.isRequired ? ' required' : ''}>`;
-    case FieldType.DateTime:
-      return `${label}<input id="${escapeHtml(name)}" name="${escapeHtml(
-        name,
-      )}" value="${value}" placeholder="2026-01-31T09:00:00Z"${field.isRequired ? ' required' : ''}>`;
-    default:
-      return `${label}<input id="${escapeHtml(name)}" name="${escapeHtml(name)}" value="${value}"${
-        field.isRequired ? ' required' : ''
-      }>`;
-  }
-}
-
-/** A table cell: lookups link through, and coded values read as their names. */
-function cell(field: FieldDef, value: unknown): string {
-  if (field.type === FieldType.Reference && value) {
-    const id = String(value);
-    return `<a href="/records/${escapeHtml(id)}"><code>${escapeHtml(id.slice(0, 8))}</code></a>`;
-  }
-  return escapeHtml(labelForValue(field, value));
-}
-
-function display(value: unknown): string {
-  if (value === null || value === undefined) return '';
-  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
-  return String(value);
 }
 
 /** Multi-selects arrive as repeated keys, which the body parser keeps intact. */

@@ -342,7 +342,8 @@ function buildWhere(
         break;
       }
       case 'like':
-        parts.push(`${column} LIKE ?`);
+        // Backslash escapes % and _ so a caller can match them literally.
+        parts.push(`${column} LIKE ? ESCAPE '\\'`);
         params.push(coerce(filter.column, filter.value as Scalar));
         break;
       default: {

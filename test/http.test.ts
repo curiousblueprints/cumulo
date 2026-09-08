@@ -23,13 +23,34 @@ class Client {
     return this.request('POST', path, body.toString());
   }
 
-  private async request(method: string, path: string, body?: string): Promise<Response> {
+  /** GET a JSON endpoint and parse it. */
+  async json<T>(path: string): Promise<T> {
+    const response = await this.get(path);
+    assert.equal(response.status, 200, `GET ${path} returned ${response.status}`);
+    return JSON.parse(await response.text()) as T;
+  }
+
+  /** POST JSON, carrying the session's CSRF token the way the client does. */
+  async postJson(path: string, body: unknown, csrfToken: string): Promise<Response> {
+    return this.request('POST', path, JSON.stringify(body), {
+      'content-type': 'application/json',
+      'x-csrf-token': csrfToken,
+    });
+  }
+
+  private async request(
+    method: string,
+    path: string,
+    body?: string,
+    extraHeaders: Record<string, string> = {},
+  ): Promise<Response> {
     const response = await fetch(`${this.base}${path}`, {
       method,
       redirect: 'manual',
       headers: {
         ...(this.cookie ? { cookie: this.cookie } : {}),
         ...(body === undefined ? {} : { 'content-type': 'application/x-www-form-urlencoded' }),
+        ...extraHeaders,
       },
       ...(body === undefined ? {} : { body }),
     });
@@ -85,11 +106,23 @@ test('setup creates the administrator and signs them in', async () => {
     password: 'correct horse',
   });
   assert.equal(created.status, 303);
-  assert.equal(created.headers.get('location'), '/tables');
+  // The user space is the client now, so setup lands in it.
+  assert.equal(created.headers.get('location'), '/app');
 
-  const dataPage = await (await client.get('/tables')).text();
-  assert.match(dataPage, /root/);
-  assert.match(dataPage, /Administrator/);
+  const shell = await (await client.get('/app')).text();
+  assert.match(shell, /<div id="root">/);
+  assert.match(shell, /\/assets\/app\.js/);
+
+  // Who is signed in comes from the API rather than the shell.
+  const me = JSON.parse(await (await client.get('/api/v1/me')).text()) as {
+    user: { username: string };
+    role: { name: string; isAdministrator: boolean };
+    tabs: unknown[];
+  };
+  assert.equal(me.user.username, 'root');
+  assert.equal(me.role.name, 'Administrator');
+  assert.equal(me.role.isAdministrator, true);
+  assert.deepEqual(me.tabs, []);
 
   // Setup is closed once it has been used.
   assert.equal((await client.get('/setup')).headers.get('location'), '/login');
@@ -102,19 +135,22 @@ test('signed-out visitors are redirected to the sign-in page', async () => {
   await setup.post('/setup', { username: 'root', email: 'r@e.com', password: 'correct horse' });
 
   const stranger = new Client(base);
-  assert.equal((await stranger.get('/tables')).headers.get('location'), '/login');
+  assert.equal((await stranger.get('/')).headers.get('location'), '/login');
   assert.equal((await stranger.get('/admin')).headers.get('location'), '/login');
+  // The API refuses rather than redirecting; the client turns that into /login.
+  assert.equal((await stranger.get('/api/v1/me')).status, 403);
 
   const failed = await stranger.post('/login', { username: 'root', password: 'nope' });
   assert.match(failed.headers.get('location') ?? '', /^\/login\?error=/);
   await close();
 });
 
-test('an administrator can build a table and a record through the UI', async () => {
+test('an administrator builds a table in setup and works it through the API', async () => {
   const { base, close } = await serve();
   const client = new Client(base);
   await client.post('/setup', { username: 'root', email: 'r@e.com', password: 'correct horse' });
 
+  // Metadata is still the server-rendered setup console.
   const admin = await (await client.get('/admin')).text();
   const token = csrf(admin);
   const stdId = /name="namespaceId" required>\s*<option value="([^"]+)"/.exec(admin)?.[1];
@@ -127,7 +163,6 @@ test('an administrator can build a table and a record through the UI', async () 
     label: 'Invoice',
   });
   const tablePath = (tableResponse.headers.get('location') ?? '').split('?')[0] as string;
-  assert.match(tablePath, /^\/admin\/tables\//);
   const tableId = tablePath.split('/').pop() as string;
 
   const tablePage = await (await client.get(tablePath)).text();
@@ -139,17 +174,54 @@ test('an administrator can build a table and a record through the UI', async () 
     type: 'number',
   });
 
-  const newRecordPage = await (await client.get(`/tables/${tableId}/new`)).text();
-  assert.match(newRecordPage, /Amount/);
-  const created = await client.post(`/tables/${tableId}/records`, {
-    _csrf: csrf(newRecordPage),
-    field_name: 'INV-1',
-    field_amount: '125',
-  });
-  assert.match(created.headers.get('location') ?? '', /^\/records\//);
+  // Records are the client's job, so they go through the API.
+  const me = await client.json<{ csrfToken: string }>('/api/v1/me');
+  const view = await client.json<{
+    table: { label: string };
+    fields: { name: string }[];
+    canCreate: boolean;
+  }>(`/api/v1/tables/${tableId}`);
+  assert.equal(view.table.label, 'Invoice');
+  assert.equal(view.canCreate, true);
+  assert.deepEqual(
+    view.fields.map((field) => field.name).sort(),
+    ['amount', 'name'],
+  );
 
-  const listing = await (await client.get(`/tables/${tableId}`)).text();
-  assert.match(listing, /125/);
+  const created = await client.postJson(
+    `/api/v1/tables/${tableId}/records`,
+    { name: 'INV-1', amount: 125 },
+    me.csrfToken,
+  );
+  assert.equal(created.status, 201);
+
+  const listed = await client.json<{ records: { values: Record<string, unknown> }[] }>(
+    `/api/v1/tables/${tableId}/records`,
+  );
+  assert.equal(listed.records.length, 1);
+  assert.equal(listed.records[0]?.values['amount'], 125);
+  await close();
+});
+
+test('the API refuses a mutation without the CSRF token', async () => {
+  const { app, base, close } = await serve();
+  const client = new Client(base);
+  await client.post('/setup', { username: 'root', email: 'r@e.com', password: 'correct horse' });
+  const admin = await app.auth.authenticate('root', 'correct horse');
+  const std = (await app.metadata.listNamespaces(admin))[0];
+  assert.ok(std);
+  const table = await app.metadata.createTable(admin, { namespaceId: std.id, name: 'Note' });
+
+  const forged = await client.postJson(
+    `/api/v1/tables/${table.id}/records`,
+    { name: 'Sneaky' },
+    'not-the-token',
+  );
+  assert.equal(forged.status, 403);
+  const body = JSON.parse(await forged.text()) as { error: string };
+  // Errors come back as JSON on the API, not as a plain-text page.
+  assert.match(body.error, /CSRF/i);
+  assert.equal((await app.records.list(admin, table.id)).length, 0);
   await close();
 });
 
@@ -199,7 +271,8 @@ test('signing out clears the session', async () => {
   const client = new Client(base);
   await client.post('/setup', { username: 'root', email: 'r@e.com', password: 'correct horse' });
   await client.post('/logout', {});
-  assert.equal((await client.get('/tables')).headers.get('location'), '/login');
+  assert.equal((await client.get('/')).headers.get('location'), '/login');
+  assert.equal((await client.get('/api/v1/me')).status, 403);
   await close();
 });
 
@@ -265,7 +338,7 @@ test('the rule form posts a multi-select and one access level per field', async 
   await close();
 });
 
-test('the UI offers creation only where a rule permits it', async () => {
+test('the API reports creation as unavailable where no rule permits it', async () => {
   const { app, base, close } = await serve();
   const admin = await app.install.completeSetup({
     username: 'root',
@@ -280,6 +353,10 @@ test('the UI offers creation only where a rule permits it', async () => {
     name: 'body',
     type: 'text' as never,
   });
+  const nameField = (await app.security.listAllFields(admin, table.id)).find(
+    (field) => field.name === 'name',
+  );
+  assert.ok(nameField);
 
   const role = await app.metadata.createSecurityRole(admin, {
     name: 'Readers',
@@ -289,7 +366,10 @@ test('the UI offers creation only where a rule permits it', async () => {
     name: 'Read notes',
     tableId: table.id,
     accessTypes: ['read' as never],
-    fieldGrants: [{ fieldId: body.id, access: FieldAccess.Read }],
+    fieldGrants: [
+      { fieldId: body.id, access: FieldAccess.Read },
+      { fieldId: nameField.id, access: FieldAccess.Read },
+    ],
   });
   await app.metadata.assignRuleToRole(admin, role.id, readOnly.id);
   await app.metadata.createUser(admin, {
@@ -301,14 +381,26 @@ test('the UI offers creation only where a rule permits it', async () => {
 
   const client = new Client(base);
   await client.post('/login', { username: 'reader', password: 'password123' });
+  const me = await client.json<{ csrfToken: string }>('/api/v1/me');
 
-  const listing = await (await client.get(`/tables/${table.id}`)).text();
-  assert.doesNotMatch(listing, /New record/);
-  assert.equal((await client.get(`/tables/${table.id}/new`)).status, 403);
+  const view = await client.json<{ canCreate: boolean; creatableFields: string[] }>(
+    `/api/v1/tables/${table.id}`,
+  );
+  // The client hides the button because the API says so...
+  assert.equal(view.canCreate, false);
+  assert.deepEqual(view.creatableFields, []);
+
+  // ...and the answer does not depend on the client honouring that.
+  const attempt = await client.postJson(
+    `/api/v1/tables/${table.id}/records`,
+    { name: 'Sneaky' },
+    me.csrfToken,
+  );
+  assert.equal(attempt.status, 403);
   await close();
 });
 
-test('a lookup field renders as a picker of records the user can see', async () => {
+test('the API exposes a lookup field and the records it can point at', async () => {
   const { app, base, close } = await serve();
   const admin = await app.install.completeSetup({
     username: 'root',
@@ -335,20 +427,40 @@ test('a lookup field renders as a picker of records the user can see', async () 
 
   const client = new Client(base);
   await client.post('/login', { username: 'root', password: 'correct horse' });
+  const me = await client.json<{ csrfToken: string }>('/api/v1/me');
 
-  const form = await (await client.get(`/tables/${contact.id}/new`)).text();
-  assert.match(form, new RegExp(`<option value="${acme.id}"`));
-  assert.match(form, /Acme/);
+  // The field says which table it points at, which is how the client knows
+  // where to fetch the picker's options from.
+  const view = await client.json<{
+    fields: { name: string; type: string; referenceTableId: string | null }[];
+  }>(`/api/v1/tables/${contact.id}`);
+  const lookup = view.fields.find((field) => field.name === 'account');
+  assert.equal(lookup?.type, 'reference');
+  assert.equal(lookup?.referenceTableId, account.id);
 
-  const created = await client.post(`/tables/${contact.id}/records`, {
-    _csrf: csrf(form),
-    field_name: 'Ada',
-    field_account: acme.id,
-  });
-  const recordPath = (created.headers.get('location') ?? '').split('?')[0] as string;
-  const detail = await (await client.get(recordPath)).text();
-  // The lookup links through to the record it points at.
-  assert.match(detail, new RegExp(`href="/records/${acme.id}"`));
+  const targets = await client.json<{ records: { id: string; values: Record<string, unknown> }[] }>(
+    `/api/v1/tables/${account.id}/records`,
+  );
+  assert.deepEqual(
+    targets.records.map((record) => record.values['name']),
+    ['Acme'],
+  );
+
+  const created = await client.postJson(
+    `/api/v1/tables/${contact.id}/records`,
+    { name: 'Ada', account: acme.id },
+    me.csrfToken,
+  );
+  assert.equal(created.status, 201);
+  const { record } = JSON.parse(await created.text()) as {
+    record: { id: string; values: Record<string, unknown> };
+  };
+  assert.equal(record.values['account'], acme.id);
+
+  const detail = await client.json<{ record: { values: Record<string, unknown> } }>(
+    `/api/v1/records/${record.id}`,
+  );
+  assert.equal(detail.record.values['account'], acme.id);
   await close();
 });
 

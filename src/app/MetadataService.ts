@@ -16,6 +16,7 @@ import {
   type NamespaceAccess,
   type SecurityRole,
   type SecurityRoleRule,
+  type SecurityRoleTab,
   type SecurityRule,
   type SecurityRuleClause,
   type SecurityRuleFieldGrant,
@@ -305,6 +306,8 @@ export class MetadataService {
       type: FieldType;
       namespaceId?: Id;
       isRequired?: boolean;
+      /** Whether a global search looks at this field. */
+      isSearchable?: boolean;
       referenceTableId?: Id | null;
     },
   ): Promise<FieldDef> {
@@ -362,6 +365,7 @@ export class MetadataService {
         // describe the caller's duty rather than the field's.
         isRequired: input.type === FieldType.AutoNumber ? false : (input.isRequired ?? false),
         referenceTableId,
+        isSearchable: input.isSearchable ?? false,
         isSystem: false,
         autoNumberNext: 1,
         createdAt: nowIso(),
@@ -401,6 +405,21 @@ export class MetadataService {
 
       // Values and field grants go with it, by the schema's cascades.
       await store.deleteField(field.id);
+    });
+  }
+
+  /** Turn global search on or off for one field. */
+  async setFieldSearchable(
+    context: SecurityContext,
+    fieldId: Id,
+    isSearchable: boolean,
+  ): Promise<FieldDef> {
+    return this.security.asAdministrator(context, async (store) => {
+      const field = await store.getField(fieldId);
+      if (!field) throw new ValidationError('Field does not exist');
+      const updated = await store.updateField(field.id, { isSearchable });
+      if (!updated) throw new ValidationError('Field does not exist');
+      return updated;
     });
   }
 
@@ -566,6 +585,90 @@ export class MetadataService {
     });
   }
 
+  // --- tabs --------------------------------------------------------------
+
+  /**
+   * Put a table on a role's tab bar. Tabs belong to the one role: they are not
+   * inherited in either direction, so each role's bar is configured on its own.
+   */
+  async addRoleTab(
+    context: SecurityContext,
+    roleId: Id,
+    tableId: Id,
+  ): Promise<GrantResult<SecurityRoleTab>> {
+    return this.security.asAdministrator(context, async (store) => {
+      const role = await store.getSecurityRole(roleId);
+      if (!role) throw new ValidationError('Role does not exist');
+      const table = await store.getTable(tableId);
+      if (!table) throw new ValidationError('Table does not exist');
+
+      const existing = await store.listRoleTabs(role.id);
+      const already = existing.find((tab) => tab.tableId === table.id);
+      if (already) return { record: already, created: false };
+
+      const tab: SecurityRoleTab = {
+        id: newId(),
+        securityRoleId: role.id,
+        tableId: table.id,
+        position: existing.length,
+        createdAt: nowIso(),
+      };
+      return { record: await store.insertRoleTab(tab), created: true };
+    });
+  }
+
+  async removeRoleTab(context: SecurityContext, tabId: Id): Promise<void> {
+    await this.security.asAdministrator(context, async (store) => {
+      const tab = await store.getRoleTab(tabId);
+      if (!tab) throw new ValidationError('Tab does not exist');
+      await store.deleteRoleTab(tab.id);
+      // Close the gap so positions stay 0..n-1 and a later move is predictable.
+      const remaining = await store.listRoleTabs(tab.securityRoleId);
+      for (const [index, other] of remaining.entries()) {
+        if (other.position !== index) await store.updateRoleTabPosition(other.id, index);
+      }
+    });
+  }
+
+  /** Move a tab one place left or right. */
+  async moveRoleTab(
+    context: SecurityContext,
+    tabId: Id,
+    direction: 'left' | 'right',
+  ): Promise<void> {
+    await this.security.asAdministrator(context, async (store) => {
+      const tab = await store.getRoleTab(tabId);
+      if (!tab) throw new ValidationError('Tab does not exist');
+      const tabs = await store.listRoleTabs(tab.securityRoleId);
+      const index = tabs.findIndex((other) => other.id === tab.id);
+      const target = direction === 'left' ? index - 1 : index + 1;
+      if (index === -1 || target < 0 || target >= tabs.length) return;
+
+      const swapped = [...tabs];
+      const [moved] = swapped.splice(index, 1);
+      swapped.splice(target, 0, moved as SecurityRoleTab);
+      for (const [position, other] of swapped.entries()) {
+        if (other.position !== position) await store.updateRoleTabPosition(other.id, position);
+      }
+    });
+  }
+
+  /** One role's tabs with their tables, for the setup console. */
+  async listRoleTabs(
+    context: SecurityContext,
+    roleId: Id,
+  ): Promise<{ tab: SecurityRoleTab; table: TableDef }[]> {
+    return this.security.readAsAdministrator(context, async (store) => {
+      const tabs = await store.listRoleTabs(roleId);
+      const resolved: { tab: SecurityRoleTab; table: TableDef }[] = [];
+      for (const tab of tabs) {
+        const table = await store.getTable(tab.tableId);
+        if (table) resolved.push({ tab, table });
+      }
+      return resolved;
+    });
+  }
+
   // --- reads (used by the presentation layer) ----------------------------
 
   listNamespaces(context: SecurityContext): Promise<Namespace[]> {
@@ -650,6 +753,8 @@ function buildNameField(table: TableDef, label: string, type: NameFieldType): Fi
     // describe the caller's duty rather than the field's.
     isRequired: type === FieldType.Text,
     referenceTableId: null,
+    // A global search looks at Name fields without being told to.
+    isSearchable: true,
     isSystem: true,
     autoNumberNext: 1,
     createdAt: nowIso(),

@@ -2,6 +2,40 @@
 
 Detail that would crowd the README. Start there for the overview.
 
+## Two presentations, one security layer
+
+The user space is a React and Mantine client under `/app`; the setup console is
+server-rendered HTML under `/admin`. They share no markup, which is deliberate
+-- an administrator should never have to work out which one they are in.
+
+What they do share is everything below the transport. `src/presentation/api`
+calls the same `MetadataService` and `RecordService` that the HTML pages call,
+so the security layer is still the only route to the data and there is no
+second, laxer path for the client to take.
+
+Both are served by the same `Router`. `registerApiRoutes` and
+`registerWebRoutes` register on one instance, which is why the API needed no
+new plumbing -- `HttpResponse` and `json()` were already there.
+
+**Session and CSRF.** The client authenticates with the same cookie as the
+pages. Cookies alone would let another origin post, so mutating API calls carry
+the session's CSRF token in an `x-csrf-token` header; `/api/v1/me` hands the
+client that token along with its identity. The HTML forms keep their hidden
+field. Errors on `/api/` paths come back as JSON rather than as a plain-text
+page, since that is what the client can read.
+
+**The bundle.** `scripts/build-client.mjs` runs esbuild over `src/client`,
+inlining React, Mantine and Mantine's stylesheet into `dist/public/app.js` and
+`app.css`. React, Mantine and esbuild are devDependencies: they exist at build
+time and are compiled away, so the runtime image still installs nothing and the
+page loads no third-party origin. The output goes under `dist` so the
+Dockerfile's single `COPY --from=build /app/dist` carries the server, the
+compiled tests and the client together.
+
+`/assets/*` is served by `serveStaticFile`, which resolves the path and checks
+it is inside the root before opening anything, so `../` in a URL cannot walk
+out of the directory.
+
 ## Layer boundaries, concretely
 
 ```
@@ -210,24 +244,52 @@ records would want either a pivot or a per-table physical projection. The
 coercion in both directions and is the single place to change if a type needs a
 different storage form.
 
-## Adding the JSON API
+## Tabs
 
-The transport already returns `HttpResponse` objects and `json()` sits beside
-`html()` in `src/presentation/http/types.ts`. To add the API:
+`securityRoleTab` is a row per (role, table) with a `position`. It is the one
+thing in the model that is not inherited, and that is a decision rather than an
+omission: rules answer "what may this role reach", which genuinely rolls up a
+hierarchy, while tabs answer "what should this role look at first", which does
+not. A manager inheriting every tab their reports have would end up with a bar
+nobody designed.
 
-1. Write `src/presentation/api/routes.ts` registering `/api/v1/...` routes on
-   the same `Router`, calling the same application services.
-2. Register it in `buildRouter` next to `registerWebRoutes`.
-3. Authenticate with a token rather than a cookie: resolve it to a
-   `SecurityContext` in `server.ts` where the session is resolved today, and
-   skip the CSRF check for token-authenticated requests (it exists to protect
-   cookie-authenticated form posts).
-4. Map errors with `statusFor`, which already translates the security layer's
-   error vocabulary into status codes.
+`SecurityLayer.listTabs` intersects the role's tabs with the tables it can
+actually reach, so a tab is dropped rather than shown broken when the rule
+behind it goes away. Ordering is kept dense (0..n-1) on every add, move and
+remove, so a later move is predictable.
 
-The JSON body parser is already in place, including repeated keys, so a
-request body of `{"accessTypes": ["read", "edit"]}` arrives the same shape as
-the equivalent multi-select.
+## Global search
+
+`SecurityLayer.search` runs in two stages, and the split is the point.
+
+Storage narrows first: `findRecordIdsMatching` does a `LIKE` over `value` rows
+whose `fieldId` is both searchable and readable by this caller. Scanning every
+value in the application would not survive a real data set.
+
+The security layer then decides, by loading each candidate through
+`getRecord` -- the ordinary read path, clauses and all. So a record the caller
+may not see is dropped even though storage matched it, and a field they may not
+read never becomes a hit, because it is not in the projection to match against.
+The candidate list is a hint; it is never the answer.
+
+Two details worth keeping. `%` and `_` are escaped and the SQL carries
+`ESCAPE '\'`, so a search for "50%" means "50%" rather than "everything".
+And the hit's display label is computed here, not in the client, because only
+this layer knows which fields the caller may read to build one from.
+
+## Opening the API to machines
+
+The API exists, but it authenticates the way a browser does. To let a script or
+another service use it:
+
+1. Add a token store and resolve a bearer token to a `SecurityContext` in
+   `server.ts`, where the session cookie is resolved today.
+2. Skip the CSRF check for token-authenticated requests. It exists to protect
+   cookie-authenticated calls; a bearer token is not sent automatically by a
+   browser, so there is nothing to forge.
+
+Nothing else needs to change: the routes already speak JSON, and `statusFor`
+already maps the security layer's vocabulary onto status codes.
 
 ## Schema evolution
 
@@ -333,6 +395,7 @@ change to the security model, which is the wrong way round.
 
 ## What is deliberately not built
 
+- A Mantine setup console; `/admin` is still server-rendered HTML
 - Ownership and audit fields (`ownerId`, `createdById`, `lastModifiedById`)
 - Editing a field: changing its type, label or whether it is required
 - Editing and deleting metadata (only creation and a few guarded deletes exist)

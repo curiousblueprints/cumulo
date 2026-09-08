@@ -211,6 +211,11 @@ export interface FieldDef {
   isRequired: boolean;
   /** Set only when `type` is Reference: the table this field points at. */
   referenceTableId: Id | null;
+  /**
+   * Whether a global search looks at this field. Name fields are searchable
+   * from the moment they are created; anything else opts in.
+   */
+  isSearchable: boolean;
   /** True for fields the platform created and will not let you delete. */
   isSystem: boolean;
   /** Only meaningful for AutoNumber: the value the next record will take. */
@@ -274,6 +279,23 @@ export interface SecurityRuleFieldGrant {
   securityRuleId: Id;
   fieldId: Id;
   access: FieldAccess;
+  createdAt: string;
+}
+
+/**
+ * A tab in the user space, belonging to one security role.
+ *
+ * Tabs are discrete per role: they are NOT inherited up or down the hierarchy
+ * the way rules are. A role that can reach a table does not thereby show it,
+ * and a parent role does not inherit its children's tabs -- what a role puts
+ * on screen is its own decision.
+ */
+export interface SecurityRoleTab {
+  id: Id;
+  securityRoleId: Id;
+  tableId: Id;
+  /** Ascending; decides the left-to-right order of the tabs. */
+  position: number;
   createdAt: string;
 }
 

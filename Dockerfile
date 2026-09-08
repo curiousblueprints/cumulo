@@ -1,15 +1,20 @@
 # ---- build ----------------------------------------------------------------
 # Node 22.13+ is required: the SQLite driver uses the built-in node:sqlite
 # module, which means the image needs no native build toolchain at all.
+#
+# The build stage also bundles the Mantine client. React, Mantine and esbuild
+# are devDependencies: they are compiled into dist/public here and never
+# installed into the runtime image.
 FROM node:22-alpine AS build
 WORKDIR /app
 
-# Only devDependencies exist (TypeScript and its node types); the runtime
-# image below installs nothing at all.
+# Everything here is a devDependency -- TypeScript, esbuild, React, Mantine --
+# and all of it is compiled away. The runtime image installs nothing.
 COPY package.json package-lock.json ./
 RUN npm ci
 
-COPY tsconfig.json ./
+COPY tsconfig.json tsconfig.client.json ./
+COPY scripts ./scripts
 COPY src ./src
 COPY test ./test
 RUN npm run build
@@ -23,8 +28,8 @@ ENV NODE_ENV=production \
 WORKDIR /app
 
 # Only the compiled output and the manifest; there are no runtime dependencies.
-# The compiled tests come along too, so `docker run <image> npm test` style
-# checks can be run against the very image that ships.
+# dist carries the server, the compiled tests and the client bundle under
+# dist/public, so one COPY ships everything the container serves.
 COPY --from=build /app/dist ./dist
 COPY package.json ./
 

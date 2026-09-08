@@ -17,6 +17,7 @@ export const T = {
   users: 'users',
   securityRule: 'securityRule',
   securityRoleRule: 'securityRoleRule',
+  securityRoleTab: 'securityRoleTab',
   table: 'table',
   field: 'field',
   securityRuleClause: 'securityRuleClause',
@@ -135,6 +136,7 @@ export const PLATFORM_SCHEMA: Schema = [
         nullable: true,
         references: { table: T.table, column: 'id' },
       },
+      { name: 'isSearchable', type: 'boolean' },
       { name: 'isSystem', type: 'boolean' },
       /** The next value an AutoNumber field will hand out. */
       { name: 'autoNumberNext', type: 'integer' },
@@ -182,6 +184,27 @@ export const PLATFORM_SCHEMA: Schema = [
       createdAt,
     ],
     uniqueConstraints: [['securityRoleId', 'securityRuleId']],
+  },
+  {
+    name: T.securityRoleTab,
+    primaryKey: 'id',
+    columns: [
+      id,
+      {
+        name: 'securityRoleId',
+        type: 'text',
+        references: { table: T.securityRole, column: 'id', onDelete: 'cascade' },
+      },
+      {
+        name: 'tableId',
+        type: 'text',
+        references: { table: T.table, column: 'id', onDelete: 'cascade' },
+      },
+      { name: 'position', type: 'integer' },
+      createdAt,
+    ],
+    uniqueConstraints: [['securityRoleId', 'tableId']],
+    indexes: [['securityRoleId']],
   },
   {
     name: T.securityRuleClause,

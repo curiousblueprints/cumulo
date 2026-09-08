@@ -8,14 +8,23 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "npm run build:server && npm run build:client",
+    "build:server": "tsc -p tsconfig.json",
+    "build:client": "node scripts/build-client.mjs",
     "start": "node --disable-warning=ExperimentalWarning dist/src/main.js",
-    "dev": "tsc -p tsconfig.json && npm start",
-    "test": "tsc -p tsconfig.json && node --disable-warning=ExperimentalWarning --test dist/test/*.test.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "dev": "npm run build && npm start",
+    "test": "npm run build:server && node --disable-warning=ExperimentalWarning --test dist/test/*.test.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit"
   },
   "devDependencies": {
+    "@mantine/core": "^9.6.0",
+    "@mantine/hooks": "^9.6.0",
     "@types/node": "^22.10.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "esbuild": "^0.28.2",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "typescript": "^5.7.2"
   }
 }
