@@ -130,7 +130,7 @@ tables be defined at runtime.
 | `namespaceAccess` | Which roles may reach which non-`std` namespaces. |
 | `users` | Users, each with exactly one security role. |
 | `table` | Logical tables ("objects"), owned by a namespace. |
-| `field` | Fields on a table, with a type and an owning namespace. |
+| `field` | Fields on a table, with a type and an owning namespace. An API name is unique on its table, whichever namespace adds it. |
 | `securityRule` | Access types, create, and clause matching, for one table. |
 | `securityRuleClause` | The predicates deciding which records a rule covers. |
 | `securityRuleFieldGrant` | The fields a rule exposes when it applies, each read-only or editable. |
@@ -290,13 +290,32 @@ and none of them owns anything.
 - In the UI a lookup renders as a picker of the records the user can actually
   read, and displays as a link through to its target.
 
+### Related lists
+
+A record's page shows the records that point at it. No extra metadata makes
+this work: a lookup field already records the table it points at, so "which
+tables have children here" is a query over `field` rather than an inspection of
+every table in turn. The field lives on the child, but it names the parent, and
+that is the structure.
+
+Each list is one lookup, so two lookups from the same table -- `Ticket.reportedBy`
+and `Ticket.assignedTo`, both pointing at `Person` -- are two lists, told apart
+by the lookup's label. Creating from a list fills that lookup in, so the new
+record joins the list it was made from.
+
+Related lists obey everything else. The record being viewed is read first, so
+children cannot be enumerated for a record you cannot see; each child is read
+the ordinary way, so clauses and field grants apply; and a lookup you cannot
+read produces no list at all, since the relationship would otherwise be visible
+through it.
+
 ## Tests
 
 ```bash
 npm test
 ```
 
-95 tests over the adapter, the clause-logic parser, the security layer
+104 tests over the adapter, the clause-logic parser, the security layer
 (hierarchy inheritance, record filtering, per-field grants and the ceiling over
 them, namespace gating, metadata protection), lookups, tabs and global search,
 the rename migration, and the HTTP surface end to end -- the setup console as

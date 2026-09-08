@@ -78,6 +78,23 @@ export class SqliteAdapter implements DatabaseAdapter {
       this.rememberTypes(table);
       db.exec(createTableSql(table));
       this.addMissingColumns(table);
+      for (const index of table.uniqueIndexes ?? []) {
+        const name = `uniq_${table.name}_${index.join('_')}`;
+        try {
+          db.exec(
+            `CREATE UNIQUE INDEX IF NOT EXISTS ${quote(name)} ON ${quote(table.name)} ` +
+              `(${index.map(quote).join(', ')})`,
+          );
+        } catch (error) {
+          // Only reachable when existing rows already break the new rule, so
+          // say which rule rather than letting a bare SQLite error escape.
+          throw new DatabaseError(
+            `Cannot apply uniqueness on ${table.name} (${index.join(', ')}): ` +
+              'existing rows already violate it and must be resolved by hand',
+            { cause: error },
+          );
+        }
+      }
       for (const index of table.indexes ?? []) {
         const name = `idx_${table.name}_${index.join('_')}`;
         db.exec(

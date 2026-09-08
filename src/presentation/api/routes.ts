@@ -97,6 +97,28 @@ export function registerApiRoutes(router: Router, app: Application): void {
     });
   });
 
+  /**
+   * The records pointing at this one. A separate call from the record itself
+   * so the page can show the record while its related lists are still loading.
+   */
+  router.get('/api/v1/records/:recordId/related', async (request) => {
+    const context = requireUser(request);
+    const lists = await app.security.listRelatedLists(
+      context,
+      request.params['recordId'] as string,
+    );
+    return json({
+      lists: lists.map((list) => ({
+        title: list.title,
+        table: describeTable(list.table),
+        field: describeField(list.field),
+        columns: list.columns.map(describeField),
+        records: list.records.map(describeRecord),
+        canCreate: list.canCreate,
+      })),
+    });
+  });
+
   router.post('/api/v1/records/:recordId', async (request) => {
     const context = requireUser(request);
     checkCsrf(request);

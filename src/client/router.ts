@@ -8,7 +8,12 @@ export type Route =
   | { kind: 'home' }
   | { kind: 'table'; tableId: string }
   | { kind: 'record'; recordId: string }
-  | { kind: 'new'; tableId: string }
+  /**
+   * `via` is set when creating from a related list: the lookup to fill in, and
+   * the record to fill it with, so the new record actually joins the list it
+   * was created from.
+   */
+  | { kind: 'new'; tableId: string; via?: { field: string; record: string } }
   | { kind: 'search'; term: string };
 
 export function parseRoute(url: URL): Route {
@@ -16,9 +21,12 @@ export function parseRoute(url: URL): Route {
   // Everything here lives under /app.
   if (segments[0] !== 'app') return { kind: 'home' };
   if (segments[1] === 'tables' && segments[2]) {
-    return segments[3] === 'new'
-      ? { kind: 'new', tableId: segments[2] }
-      : { kind: 'table', tableId: segments[2] };
+    if (segments[3] !== 'new') return { kind: 'table', tableId: segments[2] };
+    const field = url.searchParams.get('via');
+    const record = url.searchParams.get('of');
+    return field && record
+      ? { kind: 'new', tableId: segments[2], via: { field, record } }
+      : { kind: 'new', tableId: segments[2] };
   }
   if (segments[1] === 'records' && segments[2]) {
     return { kind: 'record', recordId: segments[2] };
@@ -31,8 +39,14 @@ export function hrefFor(route: Route): string {
   switch (route.kind) {
     case 'table':
       return `/app/tables/${encodeURIComponent(route.tableId)}`;
-    case 'new':
-      return `/app/tables/${encodeURIComponent(route.tableId)}/new`;
+    case 'new': {
+      const path = `/app/tables/${encodeURIComponent(route.tableId)}/new`;
+      return route.via
+        ? `${path}?via=${encodeURIComponent(route.via.field)}&of=${encodeURIComponent(
+            route.via.record,
+          )}`
+        : path;
+    }
     case 'record':
       return `/app/records/${encodeURIComponent(route.recordId)}`;
     case 'search':

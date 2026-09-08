@@ -350,9 +350,14 @@ export class MetadataService {
         throw new ValidationError('Only lookup fields may name a looked-up table');
       }
 
+      // An API name identifies a field on its table, regardless of which
+      // namespace is adding it -- which is also what stops anything claiming
+      // the `name` the table was created with.
       const existing = await store.listFields(table.id);
-      if (existing.some((field) => field.name === name && field.namespaceId === namespaceId)) {
-        throw new ValidationError(`Field "${name}" already exists on ${table.name}`);
+      if (existing.some((field) => field.name === name)) {
+        throw new ValidationError(
+          `"${name}" is already the API name of a field on ${table.name}`,
+        );
       }
 
       const field: FieldDef = {

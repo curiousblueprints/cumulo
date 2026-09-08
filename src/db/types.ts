@@ -36,6 +36,12 @@ export interface TableSchema {
   columns: ColumnDef[];
   /** Multi-column uniqueness, e.g. ['namespaceId', 'name']. */
   uniqueConstraints?: string[][];
+  /**
+   * Uniqueness expressed as an index rather than a table constraint. Unlike
+   * `uniqueConstraints`, an index can be added to a table that already exists,
+   * so this is how a uniqueness rule reaches installations created before it.
+   */
+  uniqueIndexes?: string[][];
   indexes?: string[][];
 }
 

@@ -31,6 +31,17 @@ export interface QueryOptions {
   offset?: number;
 }
 
+/** Records pointing at one record through a single lookup field. */
+export interface RelatedList {
+  table: TableDef;
+  /** The lookup on the child table that points at the record being viewed. */
+  field: FieldDef;
+  title: string;
+  columns: FieldDef[];
+  records: RecordView[];
+  canCreate: boolean;
+}
+
 /** One global-search result: the record, and the field that matched. */
 export interface SearchHit {
   record: RecordView;
@@ -391,6 +402,82 @@ export class SecurityLayer {
       const table = reachable.get(tab.tableId);
       return table ? [table] : [];
     });
+  }
+
+  // --- related lists --------------------------------------------------------
+
+  /**
+   * The records that point at this one.
+   *
+   * No extra metadata is needed to work these out: a lookup field already
+   * records the table it points at, so "which tables have children here" is a
+   * query over `field`, not an inspection of every table in turn. The field
+   * lives on the child, but it names the parent, and that is the structure.
+   *
+   * Everything is decided the ordinary way. The parent record is read first,
+   * so children cannot be enumerated for a record the caller may not see; each
+   * child is read through `getRecord`, so clauses and field grants apply; and a
+   * lookup the caller cannot read produces no list at all, since the
+   * relationship itself would otherwise be visible through it.
+   */
+  async listRelatedLists(
+    context: SecurityContext,
+    recordId: Id,
+    limitPerList = 50,
+  ): Promise<RelatedList[]> {
+    // Throws if this record is not theirs to see.
+    const parent = await this.getRecord(context, recordId);
+
+    const lookups = await this.store.listFieldsReferencing(parent.tableId);
+    if (lookups.length === 0) return [];
+
+    const reachable = new Map((await this.listTables(context)).map((table) => [table.id, table]));
+    // Two lookups from the same table need telling apart, so count them first.
+    const perTable = new Map<Id, number>();
+    for (const lookup of lookups) {
+      perTable.set(lookup.tableId, (perTable.get(lookup.tableId) ?? 0) + 1);
+    }
+
+    const lists: RelatedList[] = [];
+    for (const lookup of lookups) {
+      const childTable = reachable.get(lookup.tableId);
+      if (!childTable) continue;
+
+      const readable = await this.listReadableFields(context, childTable.id);
+      if (!readable.some((field) => field.id === lookup.id)) continue;
+
+      const candidates = await this.store.findRecordIdsByFieldValue(
+        lookup.id,
+        parent.id,
+        limitPerList * 4,
+      );
+      const records: RecordView[] = [];
+      for (const candidateId of candidates) {
+        if (records.length >= limitPerList) break;
+        try {
+          records.push(await this.getRecord(context, candidateId));
+        } catch {
+          // Not theirs to see: the list is shorter, not an error.
+        }
+      }
+
+      lists.push({
+        table: childTable,
+        field: lookup,
+        title:
+          (perTable.get(lookup.tableId) ?? 0) > 1
+            ? `${childTable.label} (${lookup.label})`
+            : childTable.label,
+        // The lookup itself is the same value on every row, so it is not a
+        // column worth spending width on.
+        columns: readable.filter((field) => field.id !== lookup.id),
+        records,
+        canCreate: await this.canCreate(context, childTable.id),
+      });
+    }
+
+    lists.sort((a, b) => a.title.localeCompare(b.title));
+    return lists;
   }
 
   // --- global search --------------------------------------------------------

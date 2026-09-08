@@ -45,6 +45,16 @@ export interface RecordDetail {
   editableFields: string[];
 }
 
+/** Records pointing at the one being viewed, through one lookup field. */
+export interface RelatedList {
+  title: string;
+  table: TableSummary;
+  field: FieldSummary;
+  columns: FieldSummary[];
+  records: RecordSummary[];
+  canCreate: boolean;
+}
+
 export interface SearchHit {
   record: RecordSummary;
   table: TableSummary;
@@ -107,6 +117,10 @@ export const api = {
 
   record(recordId: string): Promise<RecordDetail> {
     return request<RecordDetail>(`/api/v1/records/${encodeURIComponent(recordId)}`);
+  },
+
+  related(recordId: string): Promise<{ lists: RelatedList[] }> {
+    return request(`/api/v1/records/${encodeURIComponent(recordId)}/related`);
   },
 
   createRecord(

@@ -462,6 +462,21 @@ export class MetadataStore {
     return [...new Set(rows.map((row) => String(row['recordId'])))];
   }
 
+  /**
+   * Records whose value for `fieldId` is `recordId` -- the child side of a
+   * lookup. Indexed on `fieldId`, so this is a lookup rather than a scan.
+   */
+  async findRecordIdsByFieldValue(fieldId: Id, value: string, limit: number): Promise<Id[]> {
+    const rows = await this.db.find(T.value, {
+      where: [
+        { column: 'fieldId', operator: 'eq', value: fieldId },
+        { column: 'value', operator: 'eq', value },
+      ],
+      limit,
+    });
+    return rows.map((row) => String(row['recordId']));
+  }
+
   async countReferencesTo(fieldId: Id, recordId: Id): Promise<number> {
     return this.db.count(T.value, {
       where: [

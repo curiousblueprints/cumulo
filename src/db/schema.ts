@@ -157,7 +157,13 @@ export const PLATFORM_SCHEMA: Schema = [
       { name: 'autoNumberNext', type: 'integer' },
       createdAt,
     ],
-    uniqueConstraints: [['tableId', 'namespaceId', 'name']],
+    /**
+     * An API name identifies a field on its table, whatever namespace added
+     * it: two packages cannot both contribute a `status` to the same table,
+     * and nothing can contribute a second `name`. Expressed as an index so
+     * the rule also reaches databases created before it.
+     */
+    uniqueIndexes: [['tableId', 'name']],
     indexes: [['tableId']],
   },
   {

@@ -18,6 +18,7 @@ import {
   type FieldSummary,
   type RecordDetail,
   type RecordSummary,
+  type RelatedList,
   type SearchHit,
   type Session,
   type TableView,
@@ -205,9 +206,11 @@ export function TablePage({
 
 export function NewRecordPage({
   tableId,
+  via,
   navigate,
 }: {
   tableId: string;
+  via?: { field: string; record: string };
   navigate: Navigate;
 }): ReactNode {
   const [view, setView] = useState<TableView | null>(null);
@@ -230,6 +233,11 @@ export function NewRecordPage({
   if (error && !view) return <Failed message={error} />;
   if (!view) return <Loading />;
 
+  // Arriving from a related list, the lookup that list is built on starts
+  // filled in -- otherwise the record would be created outside it.
+  const viaField = via ? view.fields.find((field) => field.id === via.field) : undefined;
+  const initialValues = viaField ? { [viaField.name]: via?.record } : undefined;
+
   return (
     <Stack gap="md" maw={620}>
       <Title order={2}>New {view.table.label}</Title>
@@ -238,10 +246,15 @@ export function NewRecordPage({
         <RecordForm
           fields={view.fields}
           writable={view.creatableFields}
+          initial={initialValues}
           lookups={lookups}
           submitLabel="Create"
           busy={busy}
-          onCancel={() => navigate({ kind: 'table', tableId })}
+          onCancel={() =>
+            via
+              ? navigate({ kind: 'record', recordId: via.record })
+              : navigate({ kind: 'table', tableId })
+          }
           onSubmit={(values) => {
             setBusy(true);
             setError(null);
@@ -265,6 +278,7 @@ export function RecordPage({
   navigate: Navigate;
 }): ReactNode {
   const [detail, setDetail] = useState<RecordDetail | null>(null);
+  const [related, setRelated] = useState<RelatedList[] | null>(null);
   const [lookups, setLookups] = useState(new Map<string, { value: string; label: string }[]>());
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -279,6 +293,15 @@ export function RecordPage({
     } catch (caught) {
       setLoadError((caught as Error).message);
     }
+  }, [recordId]);
+
+  // Fetched separately so the record itself is not held up behind them.
+  useEffect(() => {
+    setRelated(null);
+    void api
+      .related(recordId)
+      .then((result) => setRelated(result.lists))
+      .catch(() => setRelated([]));
   }, [recordId]);
 
   useEffect(() => {
@@ -392,7 +415,102 @@ export function RecordPage({
           </Table>
         )}
       </Card>
+
+      {related === null ? (
+        <Loading />
+      ) : (
+        related.map((list) => (
+          <RelatedListCard
+            key={`${list.table.id}-${list.field.id}`}
+            list={list}
+            parentRecordId={record.id}
+            navigate={navigate}
+          />
+        ))
+      )}
     </Stack>
+  );
+}
+
+/**
+ * One related list: the records pointing at this one through a single lookup.
+ * The lookup column is left out -- it holds the same record on every row.
+ */
+function RelatedListCard({
+  list,
+  parentRecordId,
+  navigate,
+}: {
+  list: RelatedList;
+  parentRecordId: string;
+  navigate: Navigate;
+}): ReactNode {
+  return (
+    <Card withBorder radius="md" padding={0}>
+      <Group justify="space-between" px="lg" py="sm" wrap="nowrap">
+        <Group gap="xs">
+          <Text fw={600}>{list.title}</Text>
+          <Badge variant="light" size="sm">
+            {list.records.length}
+          </Badge>
+        </Group>
+        {list.canCreate && (
+          <Button
+            size="compact-sm"
+            variant="light"
+            onClick={() =>
+              navigate({
+                kind: 'new',
+                tableId: list.table.id,
+                via: { field: list.field.id, record: parentRecordId },
+              })
+            }
+          >
+            New
+          </Button>
+        )}
+      </Group>
+      {list.records.length === 0 ? (
+        <Text c="dimmed" size="sm" px="lg" pb="md">
+          Nothing here yet.
+        </Text>
+      ) : (
+        <Table.ScrollContainer minWidth={420}>
+          <Table highlightOnHover verticalSpacing="xs">
+            <Table.Thead>
+              <Table.Tr>
+                {list.columns.map((column) => (
+                  <Table.Th key={column.id}>{column.label}</Table.Th>
+                ))}
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
+              {list.records.map((record) => (
+                <Table.Tr key={record.id}>
+                  {list.columns.map((column, index) => (
+                    <Table.Td key={column.id}>
+                      {index === 0 ? (
+                        <Anchor
+                          href={`/app/records/${record.id}`}
+                          onClick={(event) => {
+                            event.preventDefault();
+                            navigate({ kind: 'record', recordId: record.id });
+                          }}
+                        >
+                          {displayValue(column, record.values[column.name]) || '(untitled)'}
+                        </Anchor>
+                      ) : (
+                        displayValue(column, record.values[column.name])
+                      )}
+                    </Table.Td>
+                  ))}
+                </Table.Tr>
+              ))}
+            </Table.Tbody>
+          </Table>
+        </Table.ScrollContainer>
+      )}
+    </Card>
   );
 }
 

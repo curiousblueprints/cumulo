@@ -210,6 +210,33 @@ Two smaller rules keep authoring honest. A grant with no level stated is
 read-only, since writable is the wider claim. And when a rule names the same
 field twice, the wider grant wins, so a duplicate cannot quietly narrow access.
 
+## Related lists
+
+`listRelatedLists` needs no metadata beyond what a lookup already carries.
+`field.referenceTableId` names the parent table, so the children of a table are
+`SELECT * FROM field WHERE type = 'reference' AND referenceTableId = ?` --
+`listFieldsReferencing`, which `clearLookupsTo` already used. Two indexed
+queries, not an inspection of every table.
+
+Storing the relationship on the parent as well would mean two copies of one
+fact, and the field is the copy that has to be right: it is what the writes
+validate against.
+
+A list is one *field*, not one table. Two lookups from the same table to the
+same parent are two lists -- `Ticket.reportedBy` and `Ticket.assignedTo` on a
+`Person` -- and would otherwise appear as two identically titled "Tickets", so
+the title takes the lookup's label when a table points here more than once.
+
+The list carries the lookup it was built on, which is what lets the client
+prefill it when creating from the list. Without that the button would make a
+child that immediately vanishes from the list it was created in.
+
+Access is decided by reuse rather than by new rules: the parent goes through
+`getRecord` first (so children cannot be enumerated for a record the caller
+cannot see), each child goes through `getRecord` too (so clauses and field
+grants apply), and a lookup missing from `listReadableFields` drops the whole
+list, since the relationship is exactly what that field expresses.
+
 ## Projection
 
 `SecurityLayer.project` builds the caller's view of a record. Fields outside
@@ -391,6 +418,20 @@ nothing else.
 Update checks required-ness only over the fields in the patch. A required field
 the caller is not touching keeps whatever it has, which is what lets records
 written before a field became required go on being edited.
+
+## API names
+
+A field's API name is unique on its table, expressed as a unique index rather
+than a table constraint: `applySchema` can add an index to a table that already
+exists, so the rule reaches databases created before it, which a changed
+`UNIQUE(...)` clause could not.
+
+Uniqueness deliberately ignores the namespace. Two packages contributing a
+`status` to one table would collide in every expression that names a field --
+clauses, record input, the API -- and nothing may claim the `name` the table
+was created with. If an existing database already breaks the rule, index
+creation fails with a message naming the table and columns rather than a raw
+SQLite error; it needs a human, not a guess.
 
 ## Deleting a field
 

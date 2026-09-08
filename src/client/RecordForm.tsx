@@ -7,6 +7,8 @@ interface RecordFormProps {
   fields: FieldSummary[];
   writable: string[];
   record?: RecordSummary;
+  /** Values to start from when there is no record yet. */
+  initial?: Record<string, unknown>;
   lookups: Map<string, { value: string; label: string }[]>;
   submitLabel: string;
   busy: boolean;
@@ -23,6 +25,7 @@ export function RecordForm({
   fields,
   writable,
   record,
+  initial,
   lookups,
   submitLabel,
   busy,
@@ -34,7 +37,10 @@ export function RecordForm({
   );
   const [values, setValues] = useState<Record<string, unknown>>(() =>
     Object.fromEntries(
-      editable.map((field) => [field.name, record?.values[field.name] ?? initialFor(field)]),
+      editable.map((field) => [
+        field.name,
+        record?.values[field.name] ?? initial?.[field.name] ?? initialFor(field),
+      ]),
     ),
   );
 

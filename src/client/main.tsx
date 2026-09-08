@@ -48,7 +48,9 @@ function App(): ReactNode {
     <Shell session={session} route={route} navigate={navigate}>
       {route.kind === 'home' && <NoTabsPage session={session} />}
       {route.kind === 'table' && <TablePage tableId={route.tableId} navigate={navigate} />}
-      {route.kind === 'new' && <NewRecordPage tableId={route.tableId} navigate={navigate} />}
+      {route.kind === 'new' && (
+        <NewRecordPage tableId={route.tableId} via={route.via} navigate={navigate} />
+      )}
       {route.kind === 'record' && <RecordPage recordId={route.recordId} navigate={navigate} />}
       {route.kind === 'search' && <SearchPage term={route.term} navigate={navigate} />}
     </Shell>
