@@ -188,30 +188,77 @@ interface AdminHelpers {
 function registerAdminRoutes(router: Router, app: Application, helpers: AdminHelpers): void {
   const { requireUser, action, features } = helpers;
 
+  // Setup is four fixed areas rather than one long page. They are the
+  // platform's own parts, so unlike the user space's tabs they are not
+  // configurable -- there is nothing about them for a role to decide.
   router.get('/admin', async (request) => {
+    // Checked here rather than left to the target, so someone who may not be
+    // in setup is refused instead of bounced through a redirect first.
     const context = requireUser(request);
     app.security.assertAdministrator(context);
+    return redirect('/admin/users');
+  });
 
-    const [namespaces, roles, users, tables, rules, namespaceAccess, roleRules] =
-      await Promise.all([
-        app.metadata.listNamespaces(context),
-        app.metadata.listSecurityRoles(context),
-        app.metadata.listUsers(context),
-        app.metadata.listTables(context),
-        app.metadata.listSecurityRules(context),
-        app.metadata.listNamespaceAccess(context),
-        app.metadata.listRoleRules(context),
-      ]);
+  router.get('/admin/users', async (request) => {
+    const context = requireUser(request);
+    app.security.assertAdministrator(context);
+    const [roles, users] = await Promise.all([
+      app.metadata.listSecurityRoles(context),
+      app.metadata.listUsers(context),
+    ]);
     const token = request.session?.csrfToken;
     const roleName = (id: string): string => roles.find((role) => role.id === id)?.name ?? '';
-    const tableName = (id: string): string => tables.find((table) => table.id === id)?.label ?? '';
-    const customRoles = roles.filter((role) => !role.isSystem);
 
     return html(
       page(
-        { title: 'Setup', context, ...messages(request) },
-        `<h1>Setup</h1>
-         <p class="lede">Namespaces, roles, users, tables and security rules.</p>
+        { title: 'Users', context, tab: 'users', ...messages(request) },
+        `<h1>Users</h1>
+         <p class="lede">Who can sign in, and the role each of them holds.</p>
+
+         <h2>Users</h2>
+         <section class="card">
+           <table><thead><tr><th>Username</th><th>Email</th><th>Role</th><th>Status</th></tr></thead><tbody>
+             ${users
+               .map(
+                 (user) =>
+                   `<tr><td>${escapeHtml(user.username)}</td><td>${escapeHtml(
+                     user.email,
+                   )}</td><td>${escapeHtml(roleName(user.securityRoleId))}</td><td class="muted">${
+                     user.isActive ? 'active' : 'inactive'
+                   }</td></tr>`,
+               )
+               .join('')}
+           </tbody></table>
+           <form method="post" action="/admin/users">${csrfInput(token)}
+             <div class="row">
+               <div><label>Username</label><input name="username" required minlength="3"></div>
+               <div><label>Email</label><input name="email" type="email" required></div>
+             </div>
+             <div class="row">
+               <div><label>Password</label><input name="password" type="password" required minlength="8"></div>
+               <div><label>Role</label><select name="securityRoleId" required>
+                 ${optionList(roles.map((role) => ({ id: role.id, label: role.name })))}
+               </select></div>
+             </div><button>Add user</button></form>
+         </section>`,
+      ),
+    );
+  });
+
+  router.get('/admin/data', async (request) => {
+    const context = requireUser(request);
+    app.security.assertAdministrator(context);
+    const [namespaces, tables] = await Promise.all([
+      app.metadata.listNamespaces(context),
+      app.metadata.listTables(context),
+    ]);
+    const token = request.session?.csrfToken;
+
+    return html(
+      page(
+        { title: 'Data', context, tab: 'data', ...messages(request) },
+        `<h1>Data</h1>
+         <p class="lede">The namespaces packages live in, and the tables within them.</p>
 
          <h2>Namespaces</h2>
          <section class="card">
@@ -239,32 +286,62 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
            }
          </section>
 
-         <h2>Security roles</h2>
+         <h2>Tables</h2>
          <section class="card">
-           <table><thead><tr><th>Role</th><th>Parent</th></tr></thead><tbody>
-             ${roles
+           <table><thead><tr><th>Table</th><th>Namespace</th></tr></thead><tbody>
+             ${tables
                .map(
-                 (role) =>
-                   `<tr><td><a href="/admin/roles/${escapeHtml(role.id)}">${escapeHtml(
-                     role.name,
-                   )}</a>${role.isSystem ? ' <span class="muted">(system)</span>' : ''}</td>
-                     <td class="muted">${
-                     role.parentId ? escapeHtml(roleName(role.parentId)) : '&mdash;'
-                   }</td></tr>`,
+                 (table) =>
+                   `<tr><td><a href="/admin/tables/${escapeHtml(table.id)}">${escapeHtml(
+                     table.label,
+                   )}</a></td><td class="muted"><code>${escapeHtml(
+                     namespaces.find((namespace) => namespace.id === table.namespaceId)?.name ?? '',
+                   )}</code></td></tr>`,
                )
                .join('')}
            </tbody></table>
-           <p class="muted">A role inherits the access of every role beneath it, which is why
-             Administrator &mdash; the only role without a parent &mdash; sees everything.
-             <a href="/admin/roles">View the hierarchy</a>.</p>
-           <form method="post" action="/admin/roles">${csrfInput(token)}
+           <form method="post" action="/admin/tables">${csrfInput(token)}
              <div class="row">
-               <div><label>Name</label><input name="name" required></div>
-               <div><label>Parent role</label><select name="parentId" required>
-                 ${optionList(roles.map((role) => ({ id: role.id, label: role.name })))}
+               <div><label>API name</label><input name="name" required></div>
+               <div><label>Label</label><input name="label"></div>
+               <div><label>Namespace</label><select name="namespaceId" required>
+                 ${optionList(namespaces.map((namespace) => ({ id: namespace.id, label: namespace.name })))}
                </select></div>
-             </div><button>Add role</button></form>
-         </section>
+               <div><label>Name field</label><select name="nameFieldType">
+                 <option value="${FieldType.Text}">Free text</option>
+                 <option value="${FieldType.AutoNumber}">Auto number</option>
+               </select></div>
+             </div>
+             <p class="muted">Every table gets a Name field, which is how a record is
+               referred to elsewhere. It cannot be deleted.</p>
+             <button>Add table</button></form>
+         </section>`,
+      ),
+    );
+  });
+
+  router.get('/admin/security', async (request) => {
+    const context = requireUser(request);
+    app.security.assertAdministrator(context);
+    const [namespaces, roles, tables, rules, namespaceAccess, roleRules] = await Promise.all([
+      app.metadata.listNamespaces(context),
+      app.metadata.listSecurityRoles(context),
+      app.metadata.listTables(context),
+      app.metadata.listSecurityRules(context),
+      app.metadata.listNamespaceAccess(context),
+      app.metadata.listRoleRules(context),
+    ]);
+    const token = request.session?.csrfToken;
+    const roleName = (id: string): string => roles.find((role) => role.id === id)?.name ?? '';
+    const tableName = (id: string): string => tables.find((table) => table.id === id)?.label ?? '';
+    const customRoles = roles.filter((role) => !role.isSystem);
+
+    return html(
+      page(
+        { title: 'Security', context, tab: 'security', ...messages(request) },
+        `<h1>Security</h1>
+         <p class="lede">Which namespaces a role can reach, and which rules apply to it.
+           Rules themselves are built on a table&rsquo;s page, under Data.</p>
 
          <h2>Namespace access</h2>
          <section class="card">
@@ -297,64 +374,6 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
                  )}
                </select></div>
              </div><button>Grant access</button></form>
-         </section>
-
-         <h2>Users</h2>
-         <section class="card">
-           <table><thead><tr><th>Username</th><th>Email</th><th>Role</th><th>Status</th></tr></thead><tbody>
-             ${users
-               .map(
-                 (user) =>
-                   `<tr><td>${escapeHtml(user.username)}</td><td>${escapeHtml(
-                     user.email,
-                   )}</td><td>${escapeHtml(roleName(user.securityRoleId))}</td><td class="muted">${
-                     user.isActive ? 'active' : 'inactive'
-                   }</td></tr>`,
-               )
-               .join('')}
-           </tbody></table>
-           <form method="post" action="/admin/users">${csrfInput(token)}
-             <div class="row">
-               <div><label>Username</label><input name="username" required minlength="3"></div>
-               <div><label>Email</label><input name="email" type="email" required></div>
-             </div>
-             <div class="row">
-               <div><label>Password</label><input name="password" type="password" required minlength="8"></div>
-               <div><label>Role</label><select name="securityRoleId" required>
-                 ${optionList(roles.map((role) => ({ id: role.id, label: role.name })))}
-               </select></div>
-             </div><button>Add user</button></form>
-         </section>
-
-         <h2>Tables</h2>
-         <section class="card">
-           <table><thead><tr><th>Table</th><th>Namespace</th></tr></thead><tbody>
-             ${tables
-               .map(
-                 (table) =>
-                   `<tr><td><a href="/admin/tables/${escapeHtml(table.id)}">${escapeHtml(
-                     table.label,
-                   )}</a></td><td class="muted"><code>${escapeHtml(
-                     namespaces.find((namespace) => namespace.id === table.namespaceId)?.name ?? '',
-                   )}</code></td></tr>`,
-               )
-               .join('')}
-           </tbody></table>
-           <form method="post" action="/admin/tables">${csrfInput(token)}
-             <div class="row">
-               <div><label>API name</label><input name="name" required></div>
-               <div><label>Label</label><input name="label"></div>
-               <div><label>Namespace</label><select name="namespaceId" required>
-                 ${optionList(namespaces.map((namespace) => ({ id: namespace.id, label: namespace.name })))}
-               </select></div>
-               <div><label>Name field</label><select name="nameFieldType">
-                 <option value="${FieldType.Text}">Free text</option>
-                 <option value="${FieldType.AutoNumber}">Auto number</option>
-               </select></div>
-             </div>
-             <p class="muted">Every table gets a Name field, which is how a record is
-               referred to elsewhere. It cannot be deleted.</p>
-             <button>Add table</button></form>
          </section>
 
          <h2>Security rules</h2>
@@ -463,11 +482,13 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
       (role) => role.parentId === null || !roles.some((other) => other.id === role.parentId),
     );
 
+    const token = request.session?.csrfToken;
+
     return html(
       page(
-        { title: 'Role hierarchy', context, ...messages(request) },
-        `<h1>Role hierarchy</h1>
-         <p class="lede"><a href="/admin">Back to setup</a> &middot;
+        { title: 'Roles', context, tab: 'roles', ...messages(request) },
+        `<h1>Roles</h1>
+         <p class="lede">The role hierarchy, and what each role holds.
            ${rules.length} rule${rules.length === 1 ? '' : 's'} defined.</p>
          <section class="card">
            <p class="muted">Access flows <strong>up</strong> this tree: a role holds its own
@@ -475,6 +496,17 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
              root with no rules of its own, holds everything. Tabs are the exception &mdash; they
              are configured per role and inherited in neither direction. Open a role to set them.</p>
            <ul class="tree">${roots.map((role) => renderRole(role)).join('')}</ul>
+         </section>
+
+         <h2>Add a role</h2>
+         <section class="card">
+           <form method="post" action="/admin/roles">${csrfInput(token)}
+             <div class="row">
+               <div><label>Name</label><input name="name" required></div>
+               <div><label>Parent role</label><select name="parentId" required>
+                 ${optionList(roles.map((role) => ({ id: role.id, label: role.name })))}
+               </select></div>
+             </div><button>Add role</button></form>
          </section>`,
       ),
     );
@@ -497,10 +529,9 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
 
     return html(
       page(
-        { title: role.name, context, ...messages(request) },
+        { title: role.name, context, tab: 'roles', ...messages(request) },
         `<h1>${escapeHtml(role.name)}</h1>
-         <p class="lede"><a href="/admin/roles">Back to the hierarchy</a> &middot;
-           <a href="/admin">Setup</a></p>
+         <p class="lede"><a href="/admin/roles">Back to the hierarchy</a></p>
 
          <h2>Tabs</h2>
          <section class="card">
@@ -595,7 +626,7 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
 
     return html(
       page(
-        { title: field.label, context, ...messages(request) },
+        { title: field.label, context, tab: 'data', ...messages(request) },
         `<h1>${escapeHtml(field.label)}</h1>
          <p class="lede"><a href="/admin/tables/${escapeHtml(table.id)}">Back to ${escapeHtml(
            table.label,
@@ -680,10 +711,10 @@ function registerAdminRoutes(router: Router, app: Application, helpers: AdminHel
 
     return html(
       page(
-        { title: table.label, context, ...messages(request) },
+        { title: table.label, context, tab: 'data', ...messages(request) },
         `<h1>${escapeHtml(table.label)}</h1>
-         <p class="lede"><a href="/admin">Back to setup</a> &middot;
-           <a href="/tables/${escapeHtml(table.id)}">View data</a></p>
+         <p class="lede"><a href="/admin/data">Back to Data</a> &middot;
+           <a href="/app/tables/${escapeHtml(table.id)}">View records</a></p>
 
          <h2>Fields</h2>
          <section class="card">
@@ -1117,5 +1148,5 @@ function backTo(request: HttpRequest): string {
       // fall through
     }
   }
-  return '/admin';
+  return '/admin/users';
 }

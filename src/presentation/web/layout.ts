@@ -20,8 +20,36 @@ header { border-bottom:1px solid var(--line); background:var(--card); }
 header .bar { max-width:960px; margin:0 auto; padding:12px 20px; display:flex; gap:18px; align-items:center; }
 header a { color:var(--fg); text-decoration:none; }
 header .brand { font-weight:650; letter-spacing:-.01em; }
-header .spacer { flex:1; }
-header .who { color:var(--muted); font-size:13px; }
+/* The outer thirds share the space, so "Setup" sits on the middle of the
+   window -- the same arrangement as the search box in the user space. */
+header .side { flex:1 1 0; min-width:0; display:flex; align-items:center; gap:12px; }
+header .side.right { justify-content:flex-end; }
+header .middle { flex:0 1 auto; font-weight:600; letter-spacing:.02em; color:var(--muted);
+  text-transform:uppercase; font-size:13px; }
+header .app-link { font-size:13px; color:var(--muted); }
+header .app-link:hover { color:var(--fg); }
+header .tabs { max-width:960px; margin:0 auto; padding:0 20px; display:flex; gap:2px; }
+header .tabs a { padding:8px 14px; font-size:14px; color:var(--muted); border:1px solid transparent;
+  border-bottom:none; border-radius:8px 8px 0 0; margin-bottom:-1px; }
+header .tabs a:hover { color:var(--fg); }
+header .tabs a.current { color:var(--fg); background:var(--bg); border-color:var(--line);
+  border-bottom:1px solid var(--bg); font-weight:550; }
+details.account { position:relative; }
+details.account summary { list-style:none; cursor:pointer; }
+details.account summary::-webkit-details-marker { display:none; }
+.avatar { display:inline-flex; align-items:center; justify-content:center; width:34px; height:34px;
+  border-radius:50%; background:color-mix(in srgb, var(--accent) 18%, transparent);
+  color:var(--accent); font-size:12px; font-weight:650; letter-spacing:.02em; }
+details.account .menu { position:absolute; right:0; top:42px; z-index:20; min-width:220px;
+  background:var(--card); border:1px solid var(--line); border-radius:10px; padding:6px;
+  box-shadow:0 8px 24px rgba(0,0,0,.12); }
+details.account .menu .who { display:flex; flex-direction:column; padding:8px 10px 10px;
+  border-bottom:1px solid var(--line); margin-bottom:6px; font-size:13px; }
+details.account .menu .who span { color:var(--muted); font-size:12px; }
+details.account .menu a { display:block; padding:8px 10px; border-radius:7px; font-size:14px; }
+details.account .menu a:hover { background:var(--bg); }
+details.account .menu form { margin:0; }
+details.account .menu button { margin:0; width:100%; text-align:left; border:none; padding:8px 10px; }
 main { max-width:960px; margin:0 auto; padding:24px 20px 64px; }
 h1 { font-size:22px; margin:0 0 4px; letter-spacing:-.01em; }
 h2 { font-size:16px; margin:28px 0 10px; }
@@ -51,36 +79,91 @@ ul.tree ul { margin-left:10px; padding-left:14px; border-left:1px solid var(--li
 ul.tree li { padding:5px 0; }
 `;
 
+/** The four areas of setup. Hard-coded: these are the platform's own parts. */
+export const SETUP_TABS = [
+  { id: 'users', label: 'Users', href: '/admin/users' },
+  { id: 'roles', label: 'Roles', href: '/admin/roles' },
+  { id: 'data', label: 'Data', href: '/admin/data' },
+  { id: 'security', label: 'Security', href: '/admin/security' },
+] as const;
+
+export type SetupTab = (typeof SETUP_TABS)[number]['id'];
+
 export interface PageOptions {
   title: string;
   context?: SecurityContext | null;
+  /** Which setup tab to mark as current. */
+  tab?: SetupTab;
   error?: string | null;
   notice?: string | null;
 }
 
+/**
+ * The setup frame: the same shape as the user space -- brand, a centred
+ * label, controls at the right, tabs beneath -- but the middle says "Setup"
+ * rather than offering a search, and the tabs are the platform's own four
+ * rather than a role's configured tables.
+ */
 export function page(options: PageOptions, body: string): string {
-  const nav = options.context
-    ? `<a href="/tables">Data</a>${
-        options.context.role.isSystem ? '<a href="/admin">Setup</a>' : ''
-      }<span class="spacer"></span><span class="who">${escapeHtml(
-        options.context.user.username,
-      )} &middot; ${escapeHtml(options.context.role.name)}</span>
-      <form method="post" action="/logout" class="inline"><button class="secondary" style="margin:0">Sign out</button></form>`
-    : '<span class="spacer"></span>';
+  const user = options.context;
+  const account = user
+    ? `<details class="account">
+         <summary aria-label="Account menu"><span class="avatar">${escapeHtml(
+           initials(user.user.username),
+         )}</span></summary>
+         <div class="menu">
+           <div class="who"><strong>${escapeHtml(user.user.username)}</strong>
+             <span>${escapeHtml(user.role.name)}</span></div>
+           <a href="/app">Back to the app</a>
+           <form method="post" action="/logout">
+             <button class="danger">Sign out</button>
+           </form>
+         </div>
+       </details>`
+    : '';
+
+  const tabs = options.tab
+    ? `<nav class="tabs">${SETUP_TABS.map(
+        (tab) =>
+          `<a href="${tab.href}"${tab.id === options.tab ? ' class="current"' : ''}>${escapeHtml(
+            tab.label,
+          )}</a>`,
+      ).join('')}</nav>`
+    : '';
 
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeHtml(options.title)} &middot; Cumulo</title>
+<title>${escapeHtml(options.title)} &middot; Setup &middot; Cumulo</title>
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
 <style>${STYLE}</style></head>
 <body>
-<header><div class="bar"><a class="brand" href="/">Cumulo</a>${nav}</div></header>
+<header>
+  <div class="bar">
+    <div class="side"><a class="brand" href="/app">Cumulo</a></div>
+    <div class="middle">Setup</div>
+    <div class="side right">${
+      user
+        ? `<a class="app-link" href="/app" title="Back to the app">Data</a>${account}`
+        : ''
+    }</div>
+  </div>
+  ${tabs}
+</header>
 <main>
 ${options.error ? `<p class="notice error">${escapeHtml(options.error)}</p>` : ''}
 ${options.notice ? `<p class="notice">${escapeHtml(options.notice)}</p>` : ''}
 ${body}
 </main></body></html>`;
+}
+
+/** Up to two letters, matching how the user space builds an avatar. */
+function initials(username: string): string {
+  const parts = username.trim().split(/[\s._-]+/).filter(Boolean);
+  const [first, second] = parts;
+  if (!first) return '?';
+  if (!second) return first.slice(0, 2).toUpperCase();
+  return (first.slice(0, 1) + second.slice(0, 1)).toUpperCase();
 }
 
 /** Hidden CSRF input; every state-changing form carries one. */

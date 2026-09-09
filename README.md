@@ -59,9 +59,9 @@ A fresh installation has one namespace (`std`), one security role
 user created there is locked to the Administrator role -- an installation
 whose only user could not administer it would be stranded.
 
-From `/setup` (the console, once signed in) an administrator can add roles,
-users, tables, fields and security rules, delete fields, and see the role
-hierarchy as a tree at `/admin/roles`. `/tables` is the data side: the tables the signed-in role
+From the setup console an administrator can add roles, users, tables, fields
+and security rules, edit and delete fields, and see the role hierarchy as a
+tree. `/tables` is the data side: the tables the signed-in role
 can reach, and the records within them that its rules allow.
 
 Namespaces are not created here. They are meant to arrive with a package, so
@@ -76,9 +76,21 @@ and the role's tabs beneath. Who you are and signing out live behind the
 avatar. `/app` itself sends you to your first tab -- there is no landing page
 to read. It talks to a JSON API under `/api/v1`.
 
-The **setup console** at `/admin` is server-rendered HTML. It has its own
-frame on purpose -- nothing is shared between the two, so it is obvious at a
-glance which one you are looking at.
+The **setup console** at `/admin` is server-rendered HTML, laid out the same
+way -- brand, a centred label, controls at the right, tabs beneath -- but the
+middle says **Setup** instead of offering a search, and the tabs are the
+platform's own four rather than a role's configured tables:
+
+| Tab | Holds |
+| --- | --- |
+| **Users** | Who can sign in, and the role each holds |
+| **Roles** | The role hierarchy, and adding a role |
+| **Data** | Namespaces, and the tables within them |
+| **Security** | Namespace access, and which rules apply to which role |
+
+These four are fixed, because they are the platform's own parts -- there is
+nothing about them for a role to configure. A table's fields and its rules are
+reached from that table, under Data.
 
 ## The layers
 
@@ -349,7 +361,7 @@ through it.
 npm test
 ```
 
-116 tests over the adapter, the clause-logic parser, the security layer
+118 tests over the adapter, the clause-logic parser, the security layer
 (hierarchy inheritance, record filtering, per-field grants and the ceiling over
 them, namespace gating, metadata protection), lookups, tabs and global search,
 the rename migration, and the HTTP surface end to end -- the setup console as

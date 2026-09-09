@@ -8,6 +8,22 @@ The user space is a React and Mantine client under `/app`; the setup console is
 server-rendered HTML under `/admin`. They share no markup, which is deliberate
 -- an administrator should never have to work out which one they are in.
 
+They do share a shape: brand, a centred element, controls at the right, tabs
+beneath. What fills those slots is what separates them. The user space centres
+a global search and draws tabs from the acting role's `securityRoleTab` rows;
+setup centres the word "Setup" and draws four hard-coded ones. That difference
+is the point -- setup configures the platform, so its own layout is not
+something a role gets to decide, and a search over records would be answering
+the wrong question there.
+
+`SETUP_TABS` in `layout.ts` is the list, and `PageOptions.tab` marks the
+current one. A page that omits `tab` (sign-in, first-run setup) renders no bar
+at all, which is right: neither is inside the console.
+
+The account menu is a `<details>` element rather than script. The setup console
+ships no JavaScript and this keeps it that way; signing out is still a form
+post, because the session is a cookie the page cannot clear itself.
+
 What they do share is everything below the transport. `src/presentation/api`
 calls the same `MetadataService` and `RecordService` that the HTML pages call,
 so the security layer is still the only route to the data and there is no

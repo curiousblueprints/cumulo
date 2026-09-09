@@ -151,9 +151,10 @@ test('an administrator builds a table in setup and works it through the API', as
   await client.post('/setup', { username: 'root', email: 'r@e.com', password: 'correct horse' });
 
   // Metadata is still the server-rendered setup console.
-  const admin = await (await client.get('/admin')).text();
-  const token = csrf(admin);
-  const stdId = /name="namespaceId" required>\s*<option value="([^"]+)"/.exec(admin)?.[1];
+  // Namespaces and tables live on the Data tab.
+  const dataPage = await (await client.get('/admin/data')).text();
+  const token = csrf(dataPage);
+  const stdId = /name="namespaceId" required>\s*<option value="([^"]+)"/.exec(dataPage)?.[1];
   assert.ok(stdId);
 
   const tableResponse = await client.post('/admin/tables', {
@@ -469,7 +470,7 @@ test('namespace creation is hidden and refused unless the flag is set', async ()
   const client = new Client(base);
   await client.post('/setup', { username: 'root', email: 'r@e.com', password: 'correct horse' });
 
-  const console_ = await (await client.get('/admin')).text();
+  const console_ = await (await client.get('/admin/data')).text();
   assert.doesNotMatch(console_, /action="\/admin\/namespaces"/);
   assert.match(console_, /arrive with a package/);
 
@@ -493,7 +494,7 @@ test('the flag turns namespace creation back on', async () => {
   const client = new Client(base);
   await client.post('/setup', { username: 'root', email: 'r@e.com', password: 'correct horse' });
 
-  const console_ = await (await client.get('/admin')).text();
+  const console_ = await (await client.get('/admin/data')).text();
   assert.match(console_, /action="\/admin\/namespaces"/);
   await client.post('/admin/namespaces', { _csrf: csrf(console_), name: 'acme', label: 'Acme' });
 
@@ -516,9 +517,10 @@ test('granting the same namespace access twice is not an error', async () => {
     parentId: admin.role.id,
   });
 
-  const page = await (await client.get('/admin')).text();
+  // Namespace access is on the Security tab.
+  const page = await (await client.get('/admin/security')).text();
   const token = csrf(page);
-  for (const _attempt of [1, 2]) {
+  const grant = async (): Promise<string> => {
     const response = await client.post('/admin/namespace-access', {
       _csrf: token,
       roleId: role.id,
@@ -527,12 +529,17 @@ test('granting the same namespace access twice is not an error', async () => {
     const location = decodeURIComponent(response.headers.get('location') ?? '');
     // Never a raw storage message such as "UNIQUE constraint failed".
     assert.doesNotMatch(location, /constraint/i);
-    assert.match(location, /notice=/);
-  }
+    return location;
+  };
+
+  assert.match(await grant(), /notice=Namespace access granted/);
+  // Repeating it is not an error, but it is not a grant either, and saying
+  // "granted" again would claim something that did not happen.
+  assert.match(await grant(), /already had access/);
   assert.equal((await app.metadata.listNamespaceAccess(admin)).length, 1);
 
   // ...and the console shows the grant, which is what made the repeat likely.
-  const after = await (await client.get('/admin')).text();
+  const after = await (await client.get('/admin/security')).text();
   assert.match(after, /Child/);
   assert.match(after, /acme/);
   await close();
@@ -722,5 +729,89 @@ test('the Name field’s page offers only a label, and no delete', async () => {
   assert.equal(after?.label, 'Account Name');
   assert.equal(after?.isRequired, true);
   assert.equal(after?.isSearchable, true);
+  await close();
+});
+
+test('setup is four fixed tabs, with no search and no configuration', async () => {
+  const { app, base, close } = await serve();
+  const admin = await app.install.completeSetup({
+    username: 'root',
+    email: 'r@e.com',
+    password: 'correct horse',
+  });
+  const std = (await app.metadata.listNamespaces(admin))[0];
+  assert.ok(std);
+  const table = await app.metadata.createTable(admin, { namespaceId: std.id, name: 'Invoice' });
+  // A tab on the acting role must not leak into setup's own bar.
+  await app.metadata.addRoleTab(admin, admin.role.id, table.id);
+
+  const client = new Client(base);
+  await client.post('/login', { username: 'root', password: 'correct horse' });
+
+  // /admin is the tab bar's first entry, not a page of its own.
+  assert.equal((await client.get('/admin')).headers.get('location'), '/admin/users');
+
+  const expected = [
+    ['/admin/users', 'Users'],
+    ['/admin/roles', 'Roles'],
+    ['/admin/data', 'Data'],
+    ['/admin/security', 'Security'],
+  ] as const;
+
+  for (const [path, label] of expected) {
+    const page = await (await client.get(path)).text();
+    // Every tab is offered on every page, and the current one is marked.
+    for (const [otherPath] of expected) {
+      assert.match(page, new RegExp(`href="${otherPath}"`), `${path} should link ${otherPath}`);
+    }
+    assert.match(
+      page,
+      new RegExp(`href="${path}" class="current">${label}<`),
+      `${path} should mark ${label} as current`,
+    );
+    // Setup says what it is instead of offering a global search.
+    assert.match(page, /<div class="middle">Setup<\/div>/);
+    assert.doesNotMatch(page, /Search all records/);
+    // The role's own tabs belong to the user space, not here.
+    assert.doesNotMatch(page, new RegExp(`href="/admin/tables/${table.id}" class`));
+  }
+  await close();
+});
+
+test('each setup tab holds the sections that belong to it', async () => {
+  const { app, base, close } = await serve();
+  const admin = await app.install.completeSetup({
+    username: 'root',
+    email: 'r@e.com',
+    password: 'correct horse',
+  });
+  const std = (await app.metadata.listNamespaces(admin))[0];
+  assert.ok(std);
+  await app.metadata.createTable(admin, { namespaceId: std.id, name: 'Invoice' });
+
+  const client = new Client(base);
+  await client.post('/login', { username: 'root', password: 'correct horse' });
+  const pages = {
+    users: await (await client.get('/admin/users')).text(),
+    roles: await (await client.get('/admin/roles')).text(),
+    data: await (await client.get('/admin/data')).text(),
+    security: await (await client.get('/admin/security')).text(),
+  };
+
+  // Each form lives on exactly one tab.
+  const homes = [
+    ['action="/admin/users"', 'users'],
+    ['action="/admin/roles"', 'roles'],
+    ['action="/admin/tables"', 'data'],
+    ['action="/admin/namespace-access"', 'security'],
+    ['action="/admin/role-rules"', 'security'],
+  ] as const;
+
+  for (const [form, home] of homes) {
+    for (const [tab, body] of Object.entries(pages)) {
+      const present = body.includes(form);
+      assert.equal(present, tab === home, `${form} should appear only on ${home}, saw it on ${tab}`);
+    }
+  }
   await close();
 });
